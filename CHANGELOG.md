@@ -2,6 +2,12 @@
 
 All notable changes to dsh-skill-mcp-manager (能力库 / Capability) are documented here.
 
+## [1.2.2] — 2026-10-03
+
+### Changed
+
+- **撤掉 `@deepseek-ai/dsh-*` peer 声明，宿主版本门控永不拦截本插件**：宿主启动门控（`dsh-app-boot` 的 `evaluatePluginCompatibility`）对 `peerDependencies` 里每个 `@deepseek-ai/dsh-*` 条目做 semver 比对，范围外的宿主版本直接判「与当前 dsh 不兼容」并拒绝安装/加载。1.2.1 的放宽只是把上界往外推——宿主下次跨出声明范围时会原样再拦一次。本插件实际 import 的宿主 API（`dsh-llm` 的 `createUserMessage`、`dsh-tools` 的 `assertSupportedJsonSchema`、`dsh-subprocess` 的 `scrubbedParentEnv`——最后一个本就不在 peer 里且是可选导入）都是小而稳的面，**不再声明宿主版本：真不兼容时以运行时报错暴露，而不是明明可用却被版本号挡住**。两个声明挪进 `devDependencies`（门控不检查 devDeps），本地开发/测试的 `pnpm install` 照常安装。`@deepseek-ai/cordis`、`@deepseek-ai/schemastery`、`react` 不以 `@deepseek-ai/dsh-` 开头，不在门控检查范围，保留原位。
+
 ## [1.2.1] — 2026-10-03
 
 ### Fixed
