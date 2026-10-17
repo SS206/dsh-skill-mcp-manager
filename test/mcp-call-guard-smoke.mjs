@@ -63,7 +63,7 @@ function entry(id, tier) {
   };
 }
 
-await writeFile(join(dataDir, "registry.json"), `${JSON.stringify({
+await writeFile(join(dataDir, "registry.__test__.json"), `${JSON.stringify({
   version: 1,
   entries: [entry("demo", "on-demand"), entry("eagerdemo", "eager")],
 }, null, 2)}\n`, "utf8");

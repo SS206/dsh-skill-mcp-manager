@@ -25,7 +25,7 @@ server.setRequestHandler(CallToolRequestSchema, async () => ({ content: [{ type:
 await server.connect(new StdioServerTransport());
 `, "utf8");
 
-await writeFile(join(dataDir, "registry.json"), `${JSON.stringify({
+await writeFile(join(dataDir, "registry.__test__.json"), `${JSON.stringify({
   version: 1,
   entries: [
     {

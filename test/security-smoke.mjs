@@ -232,7 +232,7 @@ async function dispose(effects) {
   try { await readFile(marker, "utf8"); started = true; } catch { /* absent */ }
   check(!started, "rejected local command was started");
   let registry = { entries: [] };
-  try { registry = JSON.parse(await readFile(join(dataDir, "registry.json"), "utf8")); } catch { /* absent */ }
+  try { registry = JSON.parse(await readFile(join(dataDir, "registry.__test__.json"), "utf8")); } catch { /* absent */ }
   check(!registry.entries?.some((entry) => entry.name === "local"), "rejected local command was saved");
 
   asks.length = 0;
@@ -332,7 +332,7 @@ async function dispose(effects) {
 {
   const dataDir = join(tmp, "eager");
   await mkdir(dataDir, { recursive: true });
-  await writeFile(join(dataDir, "registry.json"), `${JSON.stringify({
+  await writeFile(join(dataDir, "registry.__test__.json"), `${JSON.stringify({
     version: 1,
     entries: [{
       id: "demo",
@@ -392,7 +392,7 @@ async function dispose(effects) {
   await preStep({ agent, signal }, enter);
   check(native.length === afterFirst, `second turn remounted eager tools: ${native.join(",")}`);
 
-  await writeFile(join(dataDir, "registry.json"), `${JSON.stringify({
+  await writeFile(join(dataDir, "registry.__test__.json"), `${JSON.stringify({
     version: 1,
     entries: [{
       id: "down",
@@ -415,7 +415,7 @@ async function dispose(effects) {
 {
   const dataDir = join(tmp, "eager-down");
   await mkdir(dataDir, { recursive: true });
-  await writeFile(join(dataDir, "registry.json"), `${JSON.stringify({
+  await writeFile(join(dataDir, "registry.__test__.json"), `${JSON.stringify({
     version: 1,
     entries: [{
       id: "down",

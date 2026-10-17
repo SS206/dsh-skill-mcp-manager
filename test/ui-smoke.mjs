@@ -151,7 +151,7 @@ for (const name of ["mcp_register", "mcp_load", "mcp_call"]) {
 for (const name of ["prepare-uninstall", "skills", "mcp"]) {
   if (!commands.some((c) => c.name === name)) failed.push(`missing command ${name}`);
 }
-for (const path of ["/skill-mcp-manager/skills", "/skill-mcp-manager/skills/toggle", "/skill-mcp-manager/skills/delete", "/skill-mcp-manager/mcp", "/skill-mcp-manager/mcp/tool-tier", "/skill-mcp-manager/settings"]) {
+for (const path of ["/skill-mcp-manager/skills", "/skill-mcp-manager/skills/toggle", "/skill-mcp-manager/skills/delete", "/skill-mcp-manager/mcp", "/skill-mcp-manager/mcp/tool-tier", "/skill-mcp-manager/settings", "/skill-mcp-manager/profile"]) {
   if (!routes.some((r) => r.path === path)) failed.push(`missing route ${path}`);
 }
 
@@ -242,6 +242,33 @@ for (const path of ["/skill-mcp-manager/skills", "/skill-mcp-manager/skills/togg
     );
     console.log("settings: stdioMaxBufferSizeMb round-trip done");
   }
+}
+
+// Managed-profile route: the host resolves the target, reports the candidates,
+// and the settings payload exposes the stored choice. A settings POST must not
+// be able to move the target — that is the profile route's job.
+{
+  const res = makeRes();
+  await routeByPath("/skill-mcp-manager/profile").handler(makeReq("GET", "/skill-mcp-manager/profile"), res);
+  const body = bodyOf(res);
+  console.log("profile target:", body.target?.name, body.target?.source, "| choice:", JSON.stringify(body.choice));
+  if (res.status !== 200) failed.push("profile GET status != 200");
+  if (body.target?.name !== "__test__") failed.push("profile target should follow the configured profile");
+  if (body.target?.source !== "config") failed.push("profile source should be config for an explicit profile");
+  if (body.choice !== "") failed.push("an unset choice should be reported as an empty string");
+  if (!Array.isArray(body.profiles)) failed.push("profile GET must list candidate profiles");
+  if (typeof body.target?.registryFile !== "string") failed.push("profile GET must report the registry file");
+
+  const settings = makeRes();
+  await routeByPath("/skill-mcp-manager/settings").handler(makeReq("GET", "/skill-mcp-manager/settings"), settings);
+  if (bodyOf(settings).managedProfile !== "") failed.push("settings must expose managedProfile");
+
+  const refused = makeRes();
+  await routeByPath("/skill-mcp-manager/settings").handler(
+    makeReq("POST", "/skill-mcp-manager/settings", { managedProfile: "web" }),
+    refused,
+  );
+  if (refused.status !== 400) failed.push("settings POST must refuse to move the managed profile");
 }
 
 // Inject path (real host): webServer is provided lazily, so the plugin must

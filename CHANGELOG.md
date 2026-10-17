@@ -2,6 +2,27 @@
 
 All notable changes to dsh-skill-mcp-manager (能力库 / Capability) are documented here.
 
+## [1.3.0-local.1] — 2026-10-18
+
+本地维护分支（**不是上游 npm 发布**；来源与安装方式见 [`docs/LOCAL-FORK.zh.md`](docs/LOCAL-FORK.zh.md)）。
+
+### Fixed
+
+- **DSH Desktop 上认错 profile，界面 SKILL / MCP 两页全空（根因）**：旧实现只从进程 argv 取 `--profile`，而 Desktop 宿主命令行没有这个参数（profile 目录是位置参数），于是回落到 schema 默认值 `web`——reconcile 写的是 `profiles/web/cordis.patch.yml`，desktop 的原生 `dsh-mcp-client` 行从未被导入，注册表也没落盘。现在优先读宿主提供的 `ctx.profileContext`（boot 层 provide 的权威来源，含精确 `patchPath`），`--profile` 与位置参数 `<profilesRoot>/<name>` 仅作兜底。
+- **SKILL 页在 DSH 0.2.0-rc.2 上列不出任何技能**：内建 `dsh-skill-filesystem` 挂在 agent preset 层，而旧实现依赖的 `agentPresets.standingKeyFor()` 在 0.2.0-rc.2 已被移除。改为 `agentPresets.acquireScope(id)` 的租约语义（`{ key, [Symbol.asyncDispose] }`）：list 与每条 get 都在租约内完成、读完释放；API 缺失或抛错时回落全局层，页面照常可用。
+
+### Added
+
+- **管理目标可切换**：MCP 页新增「管理 profile」行——显示目标及其来源、补丁路径与候选 profile，危险目标（非运行中 profile / 未安装本插件的 profile）先警告再二次确认。`POST /skill-mcp-manager/profile` 执行切换：先读新账本（读不出来就中止）→ 把旧目标按 `rawConfig` + 原始 `disabled` 逐字交还（UI 新增条目只留账本、不写补丁）→ 换账 → 接管新目标 → 持久化选择 → 丢弃所有会话实例 → 后台预热；`GET` 同一路径返回目标与候选。`managedProfile` 存 `settings.json`（`auto` = 强制自动探测；空 = 未设置）；settings 的 POST 拒绝改目标。
+- **注册表按 profile 分账**：`registry.<profile>.json`。旧单文件 `registry.json` 首次启动一次性归入「旧版探测到的那个 profile」并保留 `registry.json.bak-<ts>`；切换目标不再把一个 profile 的服务器混进另一个。
+- 新模块 `lib/profile-target.js`（解析链、名字校验、profile 枚举、分账文件名）；新测试 `test/profile-target-smoke.mjs`、`test/profile-switch-smoke.mjs`、`test/skill-scope-smoke.mjs`。
+
+### Changed
+
+- `config.profile` 默认值由 `web` 改为空串（安装期默认，留空 = 跟随本次启动的 profile）。profile 名允许下划线开头（`__test__` 哨兵），首字符不允许点号。
+- `/mcp` 命令输出新增 `Managed profile: <name> (<source>, booted|not booted)` 一行。
+- 直接读写 `registry.json` 的测试改为按 profile 命名的文件；`ui-smoke` 覆盖新路由与 `managedProfile` 字段。
+
 ## [1.2.2] — 2026-10-03
 
 ### Changed

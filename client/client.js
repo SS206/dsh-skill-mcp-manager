@@ -374,6 +374,10 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
     const [toolDescDraft, setToolDescDraft] = useState("150");
     const [bufferMb, setBufferMb] = useState(null);
     const [bufferDraft, setBufferDraft] = useState("");
+    const [profile, setProfile] = useState(null);
+    const [profileChoice, setProfileChoice] = useState("");
+    const [profileBusy, setProfileBusy] = useState(false);
+    const [profileConfirm, setProfileConfirm] = useState("");
 
     const refresh = useCallback(async (rv) => {
       setLoading(true);
@@ -389,6 +393,18 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
     }, []);
 
     useEffect(() => { refresh(false); }, [refresh]);
+
+    const loadProfile = useCallback(async () => {
+      try {
+        const data = await getJson("/skill-mcp-manager/profile");
+        setProfile(data);
+        if (typeof data.choice === "string") setProfileChoice(data.choice);
+      } catch (err) {
+        setError(errText(err));
+      }
+    }, []);
+
+    useEffect(() => { loadProfile(); }, [loadProfile]);
 
     useEffect(() => {
       getJson("/skill-mcp-manager/settings")
@@ -439,6 +455,37 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
           : "已把 stdio 消息上限调到 " + value + " MB；对之后 mcp_load 的连接生效");
       } catch (err) {
         setError(errText(err));
+      }
+    }
+
+    // Switching is a handover, not a preference: the released profile goes back
+    // to its native rows, the new one is taken over, and the second click on the
+    // button is the confirmation step.
+    async function applyProfile() {
+      const next = profileChoice;
+      const current = profile && profile.target ? profile.target.name : "";
+      if (next !== current && profileConfirm !== next) {
+        setProfileConfirm(next);
+        setNotice("");
+        setError("");
+        return;
+      }
+      setProfileConfirm("");
+      setProfileBusy(true);
+      try {
+        const data = await postJson("/skill-mcp-manager/profile", { name: next });
+        setProfile(data);
+        if (typeof data.choice === "string") setProfileChoice(data.choice);
+        const targetName = data.target ? data.target.name : next;
+        setNotice(data.switched === true
+          ? "已接管 " + targetName + "（交还 " + data.previous + "，导入 " + data.imported + " 条）"
+            + (data.settingsPersisted === false ? "；注意：选择没有写进 settings.json，重启后会回到原目标" : "")
+          : "管理目标已是 " + targetName + "，仅记录了选择");
+        await refresh(reveal);
+      } catch (err) {
+        setError(errText(err));
+      } finally {
+        setProfileBusy(false);
       }
     }
 
@@ -605,6 +652,67 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
       );
     });
 
+    // Managed-profile row: which profile's MCP library this plugin owns, where
+    // its patch lives, and the warnings that make a target dangerous.
+    function profileBlock() {
+      if (profile === null) return null;
+      const target = profile.target || {};
+      const list = profile.profiles || [];
+      const targetEntry = list.find((item) => item.name === target.name);
+      const sourceLabel = {
+        settings: "设置页固定",
+        config: "安装配置指定",
+        context: "跟随运行中的 profile",
+        argv: "命令行 --profile",
+        positional: "命令行 profile 参数",
+        default: "兜底默认 web",
+      }[target.source] || String(target.source || "");
+      const options = [
+        h("option", { key: "__default", value: "" }, "默认（安装配置优先，否则跟随运行中的 profile）"),
+        h("option", { key: "__auto", value: "auto" }, "自动（忽略安装配置，跟随运行中的 profile）"),
+      ].concat(list.map((item) => h("option", { key: item.name, value: item.name },
+        item.name
+          + (item.booted ? "（当前运行）" : "")
+          + (item.pluginInstalled === false ? "（未安装本插件）" : ""))));
+      const warnings = [];
+      if (typeof target.bootedName === "string" && target.isBooted === false) {
+        warnings.push("当前运行的是 " + target.bootedName + "，管理目标却是 " + target.name
+          + "：两边互不影响，被交还的 profile 要等它下次启动才会恢复原生 MCP。");
+      }
+      if (targetEntry && targetEntry.pluginInstalled === false) {
+        warnings.push("目标 profile 没有装本插件：接管它的原生 MCP 之后，该 profile 启动时会没有这些服务器。");
+      }
+      if (typeof profile.legacyOwner === "string" && profile.legacyOwner !== "" && profile.legacyOwner !== target.name) {
+        warnings.push("旧版单文件 registry.json 已归入 " + profile.legacyOwner + "，切到它即可看到那批条目。");
+      }
+      const needsConfirm = profileConfirm !== "" && profileConfirm === profileChoice && profileChoice !== target.name;
+      return h("div", { className: "smx-setting smx-setting--block" },
+        h("div", { className: "smx-setting__row" },
+          h("label", { className: "smx-setting__label" }, "管理 profile"),
+          h("select", {
+            className: "smx-select",
+            value: profileChoice,
+            disabled: profileBusy,
+            "aria-label": "管理 profile",
+            onChange: (event) => { setProfileChoice(event.target.value); setProfileConfirm(""); },
+          }, options),
+          h("button", {
+            type: "button",
+            className: "smx-btn",
+            disabled: profileBusy,
+            onClick: applyProfile,
+          }, profileBusy ? "切换中…" : (needsConfirm ? "确认切换" : "应用")),
+          h("span", { className: "smx-count" }, "目标 " + target.name + "（" + sourceLabel + "）"),
+        ),
+        h("div", { className: "smx-setting__hint" },
+          "patch: " + (target.patchPath || "") + "\n" + (target.registryFile || "")),
+        needsConfirm
+          ? h(Notice, { kind: "success" }, "再点一次「确认切换」：把 " + target.name + " 交还原生 MCP，并接管 " + profileChoice + "。")
+          : null,
+        warnings.map((text, index) => h(Notice, { key: "profile-warn-" + index, kind: "error" }, text)),
+      );
+    }
+
     return h("div", { className: "smx" },
       h("div", { className: "smx-head" },
         h("span", { className: "smx-count" }, entries ? String(entries.length) + " 个服务器" : ""),
@@ -613,6 +721,7 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
           h("button", { type: "button", className: "smx-btn", onClick: () => refresh(reveal) }, "刷新"),
         ),
       ),
+      profileBlock(),
       h("div", { className: "smx-setting" },
         h("span", { className: "smx-setting__label" }, "工具描述截断（字符）"),
         h("input", {
@@ -740,6 +849,7 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
     ".smx-input { font-size:12px; padding:5px 8px; border-radius:6px; border:1px solid var(--dsw-alias-border-l2); background:var(--dsw-alias-bg-layer-1); color:var(--dsw-alias-label-primary); width:72px; }",
     ".smx-input--wide { width:auto; flex:1; min-width:0; }",
     ".smx-count { font-size:12px; color:var(--dsw-alias-label-secondary); }",
+    ".smx-setting__hint { font-size:11px; color:var(--dsw-alias-label-secondary); white-space:pre-wrap; word-break:break-all; }",
     ".smx-btn { font-size:12px; line-height:1; padding:6px 10px; border-radius:6px; border:1px solid var(--dsw-alias-border-l2); background:var(--dsw-alias-bg-layer-1); color:var(--dsw-alias-label-primary); cursor:pointer; }",
     ".smx-btn:hover { border-color:var(--dsw-alias-brand-primary); color:var(--dsw-alias-brand-primary); }",
     ".smx-btn--ghost { border-color:var(--dsw-alias-border-l1); color:var(--dsw-alias-label-secondary); }",

@@ -84,7 +84,7 @@ async function reset() {
 }
 
 async function writeRegistry(entries) {
-  await writeFile(join(dataDir, "registry.json"), `${JSON.stringify({ version: 1, entries }, null, 2)}\n`, "utf8");
+  await writeFile(join(dataDir, "registry.test.json"), `${JSON.stringify({ version: 1, entries }, null, 2)}\n`, "utf8");
 }
 
 await apply(ctx, { dataDir, profile: "test", importNativeMcp: true });
@@ -94,7 +94,7 @@ const failed = [];
 
 // 1. registry: tavily adopted as on-demand (raw config preserved), off-server
 //    as disabled (native disabled flag honored).
-const registry = JSON.parse(await readFile(join(dataDir, "registry.json"), "utf8"));
+const registry = JSON.parse(await readFile(join(dataDir, "registry.test.json"), "utf8"));
 const byName = new Map(registry.entries.map((e) => [e.name, e]));
 console.log("registry entries:", registry.entries.map((e) => `${e.name}[${e.tier}]`).join(", "));
 if (byName.get("tavily")?.tier !== "on-demand") failed.push("tavily should adopt as on-demand");
@@ -317,7 +317,7 @@ await writeFile(join(profileDir, "cordis.patch.yml"), nativePatch, "utf8");
 await apply(ctx, { dataDir, profile: "test", importNativeMcp: true });
 await new Promise((resolve) => setTimeout(resolve, 50));
 const renamedPatch = await readFile(join(profileDir, "cordis.patch.yml"), "utf8");
-const renamedRegistry = JSON.parse(await readFile(join(dataDir, "registry.json"), "utf8"));
+const renamedRegistry = JSON.parse(await readFile(join(dataDir, "registry.test.json"), "utf8"));
 console.log("---- renamed patch ----\n" + renamedPatch);
 console.log("renamed registry entries:", renamedRegistry.entries.map((e) => e.name).join(", "));
 if (renamedRegistry.entries.length !== 2) failed.push(`rename: expected 2 entries (tavily2 + absorbed off-server), got ${renamedRegistry.entries.length}`);

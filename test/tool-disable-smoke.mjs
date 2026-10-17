@@ -27,7 +27,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => ({ content: [
 await server.connect(new StdioServerTransport());
 `, "utf8");
 
-await writeFile(join(dataDir, "registry.json"), `${JSON.stringify({
+await writeFile(join(dataDir, "registry.__test__.json"), `${JSON.stringify({
   version: 1,
   entries: [
     {
@@ -214,7 +214,7 @@ try {
   if (!catalog.includes("blocked")) failed.push("catalog hid enabled tool after toggle");
   if (catalog.includes("allowed")) failed.push("catalog exposed disabled tool after toggle");
 
-  let registry = JSON.parse(await readFile(join(dataDir, "registry.json"), "utf8"));
+  let registry = JSON.parse(await readFile(join(dataDir, "registry.__test__.json"), "utf8"));
   let disabledTools = registry.entries[0]?.disabledTools ?? [];
   if (disabledTools.join(",") !== "allowed") failed.push(`registry blacklist not persisted: ${disabledTools.join(",")}`);
 
@@ -225,7 +225,7 @@ try {
       notes: "updated by model-facing tool",
       disabledTools: [],
     });
-    registry = JSON.parse(await readFile(join(dataDir, "registry.json"), "utf8"));
+    registry = JSON.parse(await readFile(join(dataDir, "registry.__test__.json"), "utf8"));
     disabledTools = registry.entries[0]?.disabledTools ?? [];
     if (disabledTools.join(",") !== "allowed") {
       failed.push(`mcp_register changed the UI-owned blacklist: ${disabledTools.join(",")}`);

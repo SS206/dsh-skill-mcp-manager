@@ -44,7 +44,7 @@ await server.connect(new StdioServerTransport());
 // Seed entries with the pre-1.1.3 snapshot shape (name + description only, no
 // inputSchema) and a non-empty metaFetchedAt so startup warm-up skips them;
 // the test then exercises the load path refreshing the stale shape.
-await writeFile(join(dataDir, "registry.json"), `${JSON.stringify({
+await writeFile(join(dataDir, "registry.__test__.json"), `${JSON.stringify({
   version: 1,
   entries: [
     {
@@ -146,8 +146,8 @@ try {
       if (!loaded.text.includes(needle)) failed.push(`mcp_load result missing ${needle}`);
     }
 
-    // 2) Persisted snapshot: registry.json entry.tools must carry inputSchema.
-    const registry = JSON.parse(await readFile(join(dataDir, "registry.json"), "utf8"));
+    // 2) Persisted snapshot: registry.__test__.json entry.tools must carry inputSchema.
+    const registry = JSON.parse(await readFile(join(dataDir, "registry.__test__.json"), "utf8"));
     const bridgeTools = registry.entries.find((entry) => entry.name === "bridge")?.tools ?? [];
     const widget = bridgeTools.find((tool) => tool.name === "widget");
     if (!widget?.inputSchema || widget.inputSchema.required?.join(",") !== "action") {

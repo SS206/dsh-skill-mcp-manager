@@ -6,7 +6,13 @@
       name: 'dsh-skill-mcp-manager'
       config:
         dataDir: ''        # empty = ~/.dsh/skill-mcp-manager (or $DSH_HOME/skill-mcp-manager)
-        profile: web       # profile whose cordis.patch.yml this plugin reconciles against
+        # Profile whose cordis.patch.yml this plugin reconciles against.
+        # '' / 'auto' = follow the profile this host booted (recommended: the
+        # plugin then manages the profile it is installed into, including DSH
+        # Desktop, which passes the profile directory positionally and never
+        # sets --profile). A name pins the target; the settings page can switch
+        # it at runtime and stores the choice in settings.json.
+        profile: ''
         trialTimeoutMs: 30000
         toolCallTimeoutMs: 60000
         catalogDescriptionMaxLength: 500
