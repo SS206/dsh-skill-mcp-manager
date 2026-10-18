@@ -58,14 +58,29 @@ for (const needed of [
 }
 
 // ── settings-page registrations ────────────────────────────────────────────
-check(/id: "mcp-manager"/.test(client), "the MCP settings section id is missing");
-check(/id: "skills-manager"/.test(client), "the skills settings section id is missing");
-check(/label: "MCP 管理"/.test(client), "the MCP nav label is missing");
-check(/label: "技能管理"/.test(client), "the skills nav label is missing");
+// One settings row (the capability page) with a tab strip, plus the plugin's
+// own page in the DSH plugin manager for the plugin-wide settings.
+check(/id: "capability"/.test(client), "the capability settings section id is missing");
+check(/label: "能力库"/.test(client), "the capability nav label is missing");
 check(/settings\.section/.test(client), "no settings.section registration");
-check(/shell\.overlay/.test(client), "the shell.overlay notice registration disappeared");
-check(!/smx-tabs/.test(client), "the tab strip was supposed to be replaced by two settings pages");
+check(!/id: "mcp-manager"/.test(client), "the split MCP settings page came back");
+check(!/id: "skills-manager"/.test(client), "the split skills settings page came back");
+check(/name: "plugins\.bundle\.config"/.test(client), "the plugin-manager seat registration is missing");
+check(/key: "dsh-skill-mcp-manager"/.test(client), "the seat is not keyed by the bundle package name");
+check(/seatFired/.test(client), "the seat fallback guard is missing");
+check(/id: "capability-config"/.test(client), "the settings fallback row is missing");
+// The tab strip is animated (sliding pill + panel entrance), per the request.
+check(/role: "tab"/.test(client), "the tab strip lost its tab semantics");
+check(/smx-seg__pill/.test(client), "the sliding tab indicator is missing");
+check(/data-index/.test(client), "the tab strip has no index for the pill to slide on");
+check(/@keyframes smx-panel-in/.test(client), "the panel entrance animation is missing");
+check(/prefers-reduced-motion/.test(client), "the reduced-motion guard is missing");
+// Skill descriptions collapse by default.
+check(/h\("details"/.test(client), "the skill description disclosure is missing");
+check(/smx-fold__body/.test(client), "the disclosure body is missing");
+check(!/smx-tabs/.test(client), "the old tab strip markup came back");
 check(!/ManagerSection/.test(client), "the old combined section is still referenced");
+check(!/settingsBlock/.test(client), "the settings block is still rendered inside the MCP page");
 
 // ── the inventory response shape the page renders ─────────────────────────
 const inventoryRoute = routes.find((route) => route.path === "/skill-mcp-manager/inventory");

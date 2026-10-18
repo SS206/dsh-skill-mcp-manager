@@ -364,10 +364,12 @@ tmp/                      # 插件内部临时文件（AI 不直接引用；无 
 
 ## 7. UI 设计（Slots）
 
-- 两个设置页（root scope，replaceRisk=none），一页一件事，与 shell 自己的设置页同构（2026-10-18 起，取代原来的单页双页签）：
-  - **MCP 管理**（`settings.section` id `mcp-manager`，order 35）：顶部「管理 profile」行（目标与来源、补丁路径与注册表路径、候选 profile、危险目标二次确认）；下面是统一清单，按来源分组（§5.14）——**托管**（档位三段、工具数徽标、详情里的逐工具启停、查看描述/刷新快照、删除条目）、**用户补丁**（启停开关 + 重启 + 只读详情）、**捆绑**（启停开关 + 重启）、**内置**（只读）；行内显示传输、工具数、「连接失败」徽标；密钥打码/显示；底部是插件设置（工具描述截断、stdio 消息上限、模型登记本地程序三档、局域网主机名允许名单）。管理非启动中的 profile 时，捆绑段隐藏并给出提示。
-  - **技能管理**（id `skills-manager`，order 36）：列表（名字 / 描述 / 路径，**按路径排序**）；头部计数「N 个技能 · 模型可见 M 个」；行内启停 Switch 成功后只更新当前行、保持滚动位置；点击条目 → 系统编辑器打开（§4.2）；删除整个 SKILL 文件夹（跨平台回收站/trash，二次确认）；部署自带技能（`node_modules` / `app.asar`）为**只读**。
-- 入口：`settings.section` 两行；`/skills`、`/mcp` 命令（`/mcp` 同时列出非托管来源）；状态同步经 HTTP 路由。
+- **一个设置行：能力库**（`settings.section` id `capability`，order 35，root scope，replaceRisk=none），内部两个页签（2026-10-18 定稿：先拆两页，用户要求回到单页 + 页签）：
+  - 页签控件是分段式的：指示块 `transform: translateX(100%)` + `.18s` 过渡，面板进入时 `@keyframes smx-panel-in`（~160ms 淡入上移），`prefers-reduced-motion: reduce` 下两者都关闭；`role="tablist"/"tab"/"tabpanel"` + `aria-selected` + ←/→ 键。
+  - **MCP 页签**只放两部分：顶部「管理 profile」行（目标与来源、补丁路径与注册表路径、候选 profile、危险目标二次确认）＋ 按来源分组的统一清单（§5.14）——**托管**（档位三段、工具数徽标、详情里的逐工具启停、查看描述/刷新快照、删除条目）、**用户补丁**（启停开关 + 重启 + 只读详情）、**捆绑**（启停开关 + 重启）、**内置**（只读）；行内显示传输、工具数、「连接失败」徽标；密钥可打码/显示。管理非启动中的 profile 时，捆绑段隐藏并给出提示。
+  - **技能页签**：列表（名字 / 只读与来源徽标 / 路径，**按路径排序**）；描述收在默认折叠的原生 `<details>` 里；头部计数「N 个技能 · 模型可见 M 个」；行内启停 Switch 成功后只更新当前行、保持滚动位置；点击条目 → 系统编辑器打开（§4.2）；删除整个 SKILL 文件夹（跨平台回收站/trash，二次确认）；部署自带技能（`node_modules` / `app.asar`）为**只读**。
+- **插件级设置挂在插件自身页面**：官方 keyed 座位 `plugins.bundle.config`（`key: "dsh-skill-mcp-manager"`，bundle 包名）渲染在 **插件列表 → dsh-skill-mcp-manager** 页（与 `dsh-plugin-subagent-director` / `dshmarket` 同一机制，DSH 0.1.7+ 的官方座位；alpha.2 起取代 `settings.plugin.item`）。内容：工具描述截断、stdio 消息上限、模型登记本地程序三档、局域网主机名允许名单，加一行当前管理目标与 patch 路径；`props.view === "summary"` 返回 `null`。座位若从未声明，3 秒后回落到 `settings.section` id `capability-config`（order 36「能力库设置」）承载同一组件。
+- 入口：`settings.section`（能力库）＋ 插件管理器座位；`/skills`、`/mcp` 命令（`/mcp` 同时列出非托管来源）；状态同步经 HTTP 路由。
 - **浏览器请求的地址检查**（2026-10-18 改，对齐 dsh-market 修复后的规则）：**Origin 缺失即放行**——DSH Desktop 的页面从 `dsh-app://` 加载，桌面端自有代理会剥掉 `origin`/`host`/`cookie`/`sec-fetch-site`，旧规则（要求 POST 带匹配 Origin）因此把桌面端**所有写操作**拒成 403 `untrusted origin`，而 GET 正常；这就是"档位切换报 untrusted origin"的根因（dsh-market issue #648 同款）。Origin 存在则必须可解析且 host 与 Host 相等（`Origin: null`、空串拒绝，覆盖沙箱 iframe / `data:` 文档）；Host 存在则必须是回环（`127.0.0.1`/`localhost`/`[::1]`）或插件设置里的局域网允许名单。设置页同一处还有「模型登记本地程序」三档。常驻连接失败时，列表在档位旁边显示「连接失败，按按需处理」。
 
 ---

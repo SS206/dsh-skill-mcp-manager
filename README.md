@@ -66,12 +66,13 @@ After install the plugin connects once to fetch real tool names and descriptions
 
 By default it manages the **profile this host booted** (read from the host's `profileContext`, never guessed from the command line) — no overreach, no misplacement. When you need it, the settings page can switch the target to web / desktop / another profile: the released profile is handed back to its native MCP config and every profile keeps its own registry.
 
-### 11. Every MCP source in one list, on two native settings pages
+### 11. Every MCP source in one list, and settings where they belong
 
-The UI is now **Settings → MCP Management** and **Settings → Skills Management** — one screen per concern, styled with DSH's own theme tokens. The MCP page merges every source a deployment can have: **Managed** (this plugin's registry: three tiers, per-tool switches, delete), **User patch** (rows left in the profile's patch layer, e.g. a loader expression that could not be evaluated), **Bundle** (servers another bundle contributes to the composed loader tree — e.g. exa, calagopus: enable/disable through a patch-layer `disabled` override, restart in place, read-only config) and **Built-in** (computer-use / browser-use). Live tool lists come from the model-facing schemas, so what the page shows is what the model can actually call.
+**Settings → Capability** is one page with an animated **Skills / MCP** tab strip. The MCP tab holds exactly two things: the managed-profile row (which profile's MCP library the plugin owns, switchable with a two-step confirmation) and one list of every server the deployment can reach — **Managed** (this plugin's registry: three tiers, per-tool switches, delete), **User patch** (rows left in the profile's patch layer), **Bundle** (servers another bundle contributes to the composed loader tree, e.g. exa and calagopus: enable/disable through a patch-layer `disabled` override, restart in place, read-only config) and **Built-in** (computer-use / browser-use). Live tool lists come from the model-facing schemas, so what the page shows is what the model can actually call. Skill descriptions collapse by default, which keeps the list readable.
 
-Because the browser half ships separately from the host process, a client that is newer than the running host degrades to the managed list with a "restart DSH" notice instead of failing.
+Plugin-wide settings (tool description truncation, stdio buffer, local-command approval, LAN allowlist) moved to the plugin's own page in the DSH plugin manager — **Plugins → dsh-skill-mcp-manager** — through the official keyed seat `plugins.bundle.config`, with a settings-row fallback for a shell that never declares that seat.
 
+Because the browser half ships separately from the host process, a client newer than the running host degrades to the managed list with a "restart DSH" notice instead of failing.
 ## Install
 
 ```bash

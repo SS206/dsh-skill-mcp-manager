@@ -381,12 +381,6 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
     const [confirming, setConfirming] = useState("");
     const [output, setOutput] = useState("");
     const [busyKey, setBusyKey] = useState("");
-    const [toolDescMax, setToolDescMax] = useState(150);
-    const [toolDescDraft, setToolDescDraft] = useState("150");
-    const [bufferMb, setBufferMb] = useState(null);
-    const [bufferDraft, setBufferDraft] = useState("");
-    const [approval, setApproval] = useState("follow");
-    const [hosts, setHosts] = useState("");
     const [profile, setProfile] = useState(null);
     const [profileChoice, setProfileChoice] = useState("");
     const [profileBusy, setProfileBusy] = useState(false);
@@ -450,72 +444,6 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
     }, []);
 
     useEffect(() => { loadProfile(); }, [loadProfile]);
-
-    useEffect(() => {
-      getJson("/skill-mcp-manager/settings")
-        .then((data) => {
-          const value = data.toolDescriptionMaxLength;
-          if (typeof value === "number" && value > 0) {
-            setToolDescMax(value);
-            setToolDescDraft(String(value));
-          }
-          const mb = data.stdioMaxBufferSizeMb;
-          if (typeof mb === "number" && mb > 0) {
-            setBufferMb(mb);
-            setBufferDraft(String(mb));
-          }
-          if (typeof data.localCommandApproval === "string") setApproval(data.localCommandApproval);
-          if (Array.isArray(data.lanHostAllowlist)) setHosts(data.lanHostAllowlist.join(", "));
-        })
-        .catch(() => {});
-    }, []);
-
-    async function saveToolDesc() {
-      const value = Number(toolDescDraft);
-      if (!Number.isInteger(value) || value <= 0 || value > 5000) {
-        setError("工具描述截断必须是 1–5000 的正整数");
-        return;
-      }
-      try {
-        await postJson("/skill-mcp-manager/settings", { toolDescriptionMaxLength: value });
-        setToolDescMax(value);
-        setNotice("已更新工具描述截断为 " + value);
-      } catch (err) {
-        setError(errText(err));
-      }
-    }
-
-    async function saveBufferMb() {
-      const text = bufferDraft.trim();
-      // Empty clears the override (back to the SDK default of 10 MB).
-      const value = text === "" ? null : Number(text);
-      if (value !== null && (!Number.isInteger(value) || value <= 0)) {
-        setError("stdio 消息上限必须是正整数（MB），留空表示使用 SDK 默认 10 MB");
-        return;
-      }
-      try {
-        await postJson("/skill-mcp-manager/settings", { stdioMaxBufferSizeMb: value });
-        setBufferMb(value);
-        setBufferDraft(value === null ? "" : String(value));
-        setNotice(value === null
-          ? "已恢复 SDK 默认上限 10 MB；新上限对之后 mcp_load 的连接生效"
-          : "已把 stdio 消息上限调到 " + value + " MB；对之后 mcp_load 的连接生效");
-      } catch (err) {
-        setError(errText(err));
-      }
-    }
-
-    async function saveSecurity() {
-      const lanHostAllowlist = hosts.split(/[\n,]/).map((item) => item.trim()).filter(Boolean);
-      try {
-        const data = await postJson("/skill-mcp-manager/settings", { localCommandApproval: approval, lanHostAllowlist: lanHostAllowlist });
-        if (typeof data.localCommandApproval === "string") setApproval(data.localCommandApproval);
-        setHosts(Array.isArray(data.lanHostAllowlist) ? data.lanHostAllowlist.join(", ") : "");
-        setNotice("已保存");
-      } catch (err) {
-        setError(errText(err));
-      }
-    }
 
     // Switching is a handover, not a preference: the released profile goes back
     // to its native rows, the new one is taken over, and the second click on the
@@ -797,64 +725,6 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
       );
     }
 
-    function settingsBlock() {
-      return h("div", { className: "smx-group" },
-        h("div", { className: "smx-group__head" },
-          h("span", { className: "smx-group__title" }, "设置"),
-          h("span", { className: "smx-group__count" }, "本插件"),
-        ),
-        h("div", { className: "smx-setting" },
-          h("span", { className: "smx-setting__label" }, "工具描述截断（字符）"),
-          h("input", {
-            type: "number",
-            className: "smx-input",
-            value: toolDescDraft,
-            min: 1,
-            max: 5000,
-            onChange: (event) => setToolDescDraft(event.target.value),
-          }),
-          h("button", { type: "button", className: "smx-btn", onClick: saveToolDesc }, "保存"),
-          h("span", { className: "smx-count" }, "当前 " + toolDescMax),
-        ),
-        h("div", { className: "smx-setting" },
-          h("span", { className: "smx-setting__label" }, "stdio 消息上限（MB）"),
-          h("input", {
-            type: "number",
-            className: "smx-input",
-            value: bufferDraft,
-            min: 1,
-            placeholder: "SDK 默认 10",
-            onChange: (event) => setBufferDraft(event.target.value),
-          }),
-          h("button", { type: "button", className: "smx-btn", onClick: saveBufferMb }, "保存"),
-          h("span", { className: "smx-count" },
-            bufferMb === null ? "当前 SDK 默认 10 MB；超限消息报错但不断连接" : "当前 " + bufferMb + " MB"),
-        ),
-        h("div", { className: "smx-setting smx-setting--block" },
-          h("div", { className: "smx-setting__row" },
-            h("label", { className: "smx-setting__label" }, "模型登记本地程序"),
-            h("select", {
-              className: "smx-select",
-              value: approval,
-              onChange: (event) => setApproval(event.target.value),
-            }, APPROVAL_OPTIONS.map((option) => h("option", { key: option[0], value: option[0] }, option[1]))),
-          ),
-          h("div", { className: "smx-setting__row" },
-            h("label", { className: "smx-setting__label" }, "局域网主机名"),
-            h("input", {
-              className: "smx-input smx-input--wide",
-              value: hosts,
-              placeholder: "默认空。只有用电脑名打开管理页时才填写",
-              onChange: (event) => setHosts(event.target.value),
-            }),
-          ),
-          h("div", { className: "smx-setting__save" },
-            h("button", { type: "button", className: "smx-btn", onClick: saveSecurity }, "保存"),
-          ),
-        ),
-      );
-    }
-
     const servers = inventory && Array.isArray(inventory.servers) ? inventory.servers : [];
     const counts = (inventory && inventory.counts) || {};
     const groups = SOURCE_ORDER
@@ -894,7 +764,6 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
             count: group.rows.length,
             hint: SOURCE_HINT[group.source] || "",
           }, h("ul", { className: "smx-list" }, group.rows.map(serverRow)))),
-      settingsBlock(),
     );
   }
 
@@ -960,7 +829,15 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
           skill.source ? h("span", { className: "smx-row__meta" }, skill.source) : null,
         ),
         h("div", { className: "smx-row__path" }, skill.path),
-        skill.description ? h("div", { className: "smx-row__desc" }, skill.description) : null,
+        // Descriptions are long, and a column of them is what made this list
+        // read as a wall of text: each one lives in a disclosure that starts
+        // collapsed. Native <details> keeps it keyboard-reachable with no state.
+        skill.description
+          ? h("details", { className: "smx-fold" },
+              h("summary", { className: "smx-fold__summary" }, "描述"),
+              h("div", { className: "smx-fold__body" }, skill.description),
+            )
+          : null,
       ),
       h("div", { className: "smx-row__actions" },
         skill.readonly
@@ -996,6 +873,159 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
       loading ? h(Empty, null, "加载中…")
         : skills && skills.length === 0 ? h(Empty, null, "没有可管理的技能（bundle 型 SKILL.md）")
         : h("ul", { className: "smx-list" }, rows),
+    );
+  }
+
+  // ── plugin configuration (the DSH plugin manager's own page) ─────────────
+  // These four settings are plugin-wide rather than per-server, so they live on
+  // the plugin's own page (插件列表 → dsh-skill-mcp-manager) through the official
+  // keyed seat `plugins.bundle.config`, instead of crowding the MCP list.
+  function PluginConfigSection(props) {
+    const [toolDescMax, setToolDescMax] = useState(150);
+    const [toolDescDraft, setToolDescDraft] = useState("150");
+    const [bufferMb, setBufferMb] = useState(null);
+    const [bufferDraft, setBufferDraft] = useState("");
+    const [approval, setApproval] = useState("follow");
+    const [hosts, setHosts] = useState("");
+    const [target, setTarget] = useState(null);
+    const [notice, setNotice] = useState("");
+    const [error, setError] = useState("");
+
+    useEffect(() => {
+      getJson("/skill-mcp-manager/settings")
+        .then((data) => {
+          const value = data.toolDescriptionMaxLength;
+          if (typeof value === "number" && value > 0) {
+            setToolDescMax(value);
+            setToolDescDraft(String(value));
+          }
+          const mb = data.stdioMaxBufferSizeMb;
+          if (typeof mb === "number" && mb > 0) {
+            setBufferMb(mb);
+            setBufferDraft(String(mb));
+          }
+          if (typeof data.localCommandApproval === "string") setApproval(data.localCommandApproval);
+          if (Array.isArray(data.lanHostAllowlist)) setHosts(data.lanHostAllowlist.join(", "));
+        })
+        .catch(() => {});
+      getJson("/skill-mcp-manager/profile")
+        .then((data) => setTarget(data && data.target ? data.target : null))
+        .catch(() => {});
+    }, []);
+
+    async function saveToolDesc() {
+      const value = Number(toolDescDraft);
+      if (!Number.isInteger(value) || value <= 0 || value > 5000) {
+        setError("工具描述截断必须是 1–5000 的正整数");
+        return;
+      }
+      try {
+        await postJson("/skill-mcp-manager/settings", { toolDescriptionMaxLength: value });
+        setToolDescMax(value);
+        setNotice("已更新工具描述截断为 " + value);
+        setError("");
+      } catch (err) {
+        setError(errText(err));
+      }
+    }
+
+    async function saveBufferMb() {
+      const text = bufferDraft.trim();
+      // Empty clears the override (back to the SDK default of 10 MB).
+      const value = text === "" ? null : Number(text);
+      if (value !== null && (!Number.isInteger(value) || value <= 0)) {
+        setError("stdio 消息上限必须是正整数（MB），留空表示使用 SDK 默认 10 MB");
+        return;
+      }
+      try {
+        await postJson("/skill-mcp-manager/settings", { stdioMaxBufferSizeMb: value });
+        setBufferMb(value);
+        setBufferDraft(value === null ? "" : String(value));
+        setNotice(value === null
+          ? "已恢复 SDK 默认上限 10 MB；新上限对之后 mcp_load 的连接生效"
+          : "已把 stdio 消息上限调到 " + value + " MB；对之后 mcp_load 的连接生效");
+        setError("");
+      } catch (err) {
+        setError(errText(err));
+      }
+    }
+
+    async function saveSecurity() {
+      const lanHostAllowlist = hosts.split(/[\n,]/).map((item) => item.trim()).filter(Boolean);
+      try {
+        const data = await postJson("/skill-mcp-manager/settings", { localCommandApproval: approval, lanHostAllowlist: lanHostAllowlist });
+        if (typeof data.localCommandApproval === "string") setApproval(data.localCommandApproval);
+        setHosts(Array.isArray(data.lanHostAllowlist) ? data.lanHostAllowlist.join(", ") : "");
+        setNotice("已保存");
+        setError("");
+      } catch (err) {
+        setError(errText(err));
+      }
+    }
+
+    // `summary` is the seat's reserved compact view; this section renders its
+    // full page only.
+    if (props && props.view === "summary") return null;
+
+    return h("div", { className: "smx smx-config" },
+      h("div", { className: "smx-group__head" },
+        h("span", { className: "smx-group__title" }, "能力库设置"),
+        target ? h("span", { className: "smx-group__count" }, "管理目标 " + target.name) : null,
+      ),
+      notice ? h(Notice, { kind: "success", onDismiss: () => setNotice("") }, notice) : null,
+      error ? h(Notice, { kind: "error", onDismiss: () => setError("") }, error) : null,
+      h("div", { className: "smx-setting" },
+        h("span", { className: "smx-setting__label" }, "工具描述截断（字符）"),
+        h("input", {
+          type: "number",
+          className: "smx-input",
+          value: toolDescDraft,
+          min: 1,
+          max: 5000,
+          onChange: (event) => setToolDescDraft(event.target.value),
+        }),
+        h("button", { type: "button", className: "smx-btn", onClick: saveToolDesc }, "保存"),
+        h("span", { className: "smx-count" }, "当前 " + toolDescMax),
+      ),
+      h("div", { className: "smx-setting" },
+        h("span", { className: "smx-setting__label" }, "stdio 消息上限（MB）"),
+        h("input", {
+          type: "number",
+          className: "smx-input",
+          value: bufferDraft,
+          min: 1,
+          placeholder: "SDK 默认 10",
+          onChange: (event) => setBufferDraft(event.target.value),
+        }),
+        h("button", { type: "button", className: "smx-btn", onClick: saveBufferMb }, "保存"),
+        h("span", { className: "smx-count" },
+          bufferMb === null ? "当前 SDK 默认 10 MB；超限消息报错但不断连接" : "当前 " + bufferMb + " MB"),
+      ),
+      h("div", { className: "smx-setting smx-setting--block" },
+        h("div", { className: "smx-setting__row" },
+          h("label", { className: "smx-setting__label" }, "模型登记本地程序"),
+          h("select", {
+            className: "smx-select",
+            value: approval,
+            onChange: (event) => setApproval(event.target.value),
+          }, APPROVAL_OPTIONS.map((option) => h("option", { key: option[0], value: option[0] }, option[1]))),
+        ),
+        h("div", { className: "smx-setting__row" },
+          h("label", { className: "smx-setting__label" }, "局域网主机名"),
+          h("input", {
+            className: "smx-input smx-input--wide",
+            value: hosts,
+            placeholder: "默认空。只有用电脑名打开管理页时才填写",
+            onChange: (event) => setHosts(event.target.value),
+          }),
+        ),
+        h("div", { className: "smx-setting__save" },
+          h("button", { type: "button", className: "smx-btn", onClick: saveSecurity }, "保存"),
+        ),
+      ),
+      h("div", { className: "smx-setting__hint" },
+        "MCP 服务器列表与 profile 切换在 设置 → 能力库 的「MCP」页签；技能列表在同一个页面的「技能」页签。"),
+      target && target.patchPath ? h("div", { className: "smx-setting__hint" }, "patch: " + target.patchPath) : null,
     );
   }
 
@@ -1087,6 +1117,27 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
     ".smx-tool__desc { color:var(--dsw-alias-label-secondary); }",
     ".smx-tool.is-disabled .smx-tool__name, .smx-tool.is-disabled .smx-tool__desc { color:var(--dsw-alias-label-secondary); }",
     ".smx-output { margin:0; padding:8px; border-radius:6px; background:var(--dsw-alias-bg-layer-2); color:var(--dsw-alias-label-primary); font-size:11px; white-space:pre-wrap; word-break:break-word; max-height:220px; overflow:auto; }",
+    ".smx-config { display:flex; flex-direction:column; gap:10px; }",
+    // Tab strip: a segmented control whose indicator slides between the two
+    // halves (transform, so it stays on the compositor), plus a short panel
+    // entrance so switching reads as a move rather than a repaint.
+    ".smx-seg { position:relative; display:inline-flex; flex:none; align-self:flex-start; padding:3px; border-radius:9px; background:var(--dsw-alias-bg-layer-2); border:1px solid var(--dsw-alias-border-l1); }",
+    ".smx-seg__pill { position:absolute; top:3px; bottom:3px; left:3px; width:calc((100% - 6px)/2); border-radius:6px; background:var(--dsw-alias-bg-layer-1); box-shadow:0 1px 3px rgba(0,0,0,.12); transition:transform .18s cubic-bezier(.2,.8,.2,1); }",
+    ".smx-seg[data-index='1'] .smx-seg__pill { transform:translateX(100%); }",
+    ".smx-seg__btn { position:relative; z-index:1; display:inline-flex; align-items:center; justify-content:center; min-width:88px; padding:6px 14px; font-size:12px; border:none; background:transparent; color:var(--dsw-alias-label-secondary); cursor:pointer; border-radius:6px; transition:color .18s ease; }",
+    ".smx-seg__btn.is-on { color:var(--dsw-alias-label-primary); font-weight:500; }",
+    ".smx-seg__btn:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:1px; }",
+    ".smx-panel { display:flex; flex-direction:column; gap:12px; min-width:0; animation:smx-panel-in .16s ease-out; }",
+    "@keyframes smx-panel-in { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }",
+    // Skill descriptions: a collapsed disclosure per row.
+    ".smx-fold { font-size:12px; }",
+    ".smx-fold__summary { cursor:pointer; list-style:none; display:inline-flex; align-items:center; gap:4px; color:var(--dsw-alias-label-secondary); }",
+    ".smx-fold__summary::-webkit-details-marker { display:none; }",
+    ".smx-fold__summary::before { content:'▸'; font-size:10px; transition:transform .15s ease; }",
+    ".smx-fold[open] .smx-fold__summary::before { transform:rotate(90deg); }",
+    ".smx-fold__summary:hover { color:var(--dsw-alias-brand-primary); }",
+    ".smx-fold__body { margin-top:6px; padding-left:12px; line-height:1.6; white-space:pre-wrap; color:var(--dsw-alias-label-secondary); }",
+    "@media (prefers-reduced-motion: reduce) { .smx-panel { animation:none; } .smx-seg__pill { transition:none; } }",
   ].join("\n");
 
   function injectCss() {
@@ -1100,24 +1151,87 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
     document.head.appendChild(tag);
   }
 
+  // ── capability page (tabs: 技能 / MCP) ───────────────────────────────────
+  // One settings row, two tabs: the shell's own pages are single-purpose, and a
+  // tab strip keeps both halves one click away without crowding either.
+  const CAPABILITY_TABS = [
+    { id: "skills", label: "技能" },
+    { id: "mcp", label: "MCP" },
+  ];
+
+  function CapabilityPage() {
+    const [tab, setTab] = useState("skills");
+    const index = Math.max(0, CAPABILITY_TABS.findIndex((item) => item.id === tab));
+    function move(step) {
+      const next = (index + step + CAPABILITY_TABS.length) % CAPABILITY_TABS.length;
+      setTab(CAPABILITY_TABS[next].id);
+    }
+    return h("div", { className: "smx" },
+      h("div", {
+        className: "smx-seg",
+        role: "tablist",
+        "data-index": String(index),
+        onKeyDown: (event) => {
+          if (event.key === "ArrowRight") { event.preventDefault(); move(1); }
+          if (event.key === "ArrowLeft") { event.preventDefault(); move(-1); }
+        },
+      },
+        h("span", { className: "smx-seg__pill", "aria-hidden": "true" }),
+        CAPABILITY_TABS.map((item, position) => h("button", {
+          key: item.id,
+          type: "button",
+          role: "tab",
+          id: "capability-tab-" + item.id,
+          "aria-selected": tab === item.id ? "true" : "false",
+          "aria-controls": "capability-panel-" + item.id,
+          tabIndex: tab === item.id ? 0 : -1,
+          className: cx("smx-seg__btn", tab === item.id && "is-on"),
+          onClick: () => setTab(CAPABILITY_TABS[position].id),
+        }, item.label)),
+      ),
+      h("div", {
+        className: "smx-panel",
+        key: tab,
+        role: "tabpanel",
+        id: "capability-panel-" + tab,
+        "aria-labelledby": "capability-tab-" + tab,
+      }, tab === "skills" ? h(SkillsPage) : h(McpPage)),
+    );
+  }
+
   // ── apply ────────────────────────────────────────────────────────────────
-  // One settings nav row per concern, the way the shell's own pages are laid
-  // out: MCP management and skill management are separate screens, and the
-  // capability page no longer hides both behind a tab strip.
   function apply(ctx) {
     injectCss();
     ctx.slots.inject("settings.section", () => ctx.slots.register({
       name: "settings.section",
-      id: "mcp-manager",
+      id: "capability",
       order: 35,
-      label: "MCP 管理",
-    }, McpPage));
-    ctx.slots.inject("settings.section", () => ctx.slots.register({
-      name: "settings.section",
-      id: "skills-manager",
-      order: 36,
-      label: "技能管理",
-    }, SkillsPage));
+      label: "能力库",
+    }, CapabilityPage));
+    // Plugin-wide settings belong on the plugin's own page in the DSH plugin
+    // manager (插件列表 → dsh-skill-mcp-manager): the official keyed seat, keyed
+    // by the bundle's package name.
+    let seatFired = false;
+    ctx.slots.inject("plugins.bundle.config", () => {
+      seatFired = true;
+      return ctx.slots.register({
+        name: "plugins.bundle.config",
+        key: "dsh-skill-mcp-manager",
+      }, PluginConfigSection);
+    });
+    // A shell that never declares that seat would leave these settings with no
+    // home at all, so they fall back to their own settings row. The seat
+    // firing cancels the fallback; a late seat simply wins.
+    const fallback = setTimeout(() => {
+      if (seatFired) return;
+      ctx.slots.inject("settings.section", () => ctx.slots.register({
+        name: "settings.section",
+        id: "capability-config",
+        order: 36,
+        label: "能力库设置",
+      }, PluginConfigSection));
+    }, 3000);
+    if (fallback && typeof fallback.unref === "function") fallback.unref();
     // Frame-wide notices belong in the shell overlay, not in a settings page:
     // `shell.overlay` is a root-scope `list` slot rendered with no props inside
     // the frame's pointer-events:none layer, so the occupant positions itself
