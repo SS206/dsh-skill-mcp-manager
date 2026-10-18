@@ -44,7 +44,9 @@ const webNative = [
   "      config:",
   "        serverName: tavily",
   "        transport: streamable-http",
-  "        url: 'http://127.0.0.1:1/mcp/'",
+  "        url: !!js \"'http://127.0.0.1:1/mcp/'\"",
+  "        headers:",
+  "          Authorization: !!js \"process.env.TAVILY_KEY || ''\"",
   "        toolCallTimeoutMs: 120000",
   "    - id: mcp-off",
   "      name: '@deepseek-ai/dsh-mcp-client'",
@@ -129,6 +131,13 @@ async function postProfile(name) {
 }
 
 const readPatch = (dir) => readFile(join(dir, "cordis.patch.yml"), "utf8");
+// One row's text, so a flag can be asserted on that row alone.
+const rowOf = (text, id, nextId) => {
+  const start = text.indexOf("- id: " + id);
+  if (start < 0) return "";
+  const end = text.indexOf("- id: " + nextId, start);
+  return text.slice(start, end < 0 ? undefined : end);
+};
 const readJson = async (file) => JSON.parse(await readFile(join(dataDir, file), "utf8"));
 const hasManaged = (text) => text.includes("# ── Managed MCP servers (dsh-skill-mcp-manager");
 const rowCount = (text) => (text.match(/name: ['"]?@deepseek-ai\/dsh-mcp-client['"]?/g) || []).length;
@@ -190,6 +199,11 @@ await new Promise((resolve) => setTimeout(resolve, 300));
   if (rowCount(webPatch) !== 2) failed.push("web should own exactly 2 rows after adoption");
   const managedPart = webPatch.slice(webPatch.indexOf("# ── Managed MCP servers"));
   if (!/off-server[\s\S]*disabled: true/.test(managedPart)) failed.push("an originally disabled row must stay disabled in the block");
+  // Loader expressions survive the takeover: the managed row is written from
+  // the source text, not from the parsed (literal) value.
+  if (!managedPart.includes("url: !!js \"'http://127.0.0.1:1/mcp/'\"")) failed.push("managed web row lost its !!js url");
+  if (!managedPart.includes("Authorization: !!js \"process.env.TAVILY_KEY || ''\"")) failed.push("managed web row lost its !!js header");
+  if (!rowOf(managedPart, "mcp-tavily", "mcp-off").includes("disabled: true")) failed.push("managed tavily row should be disabled");
 
   const webRegistry = await readJson("registry.web.json");
   console.log("web registry:", webRegistry.entries.map((entry) => entry.name + "[" + entry.tier + "]").join(", "));
@@ -219,6 +233,9 @@ await new Promise((resolve) => setTimeout(resolve, 300));
   if (hasManaged(webPatch)) failed.push("web must be handed back when desktop is adopted");
   if (rowCount(webPatch) !== 2) failed.push("web should keep exactly its 2 restored rows");
   if (!/serverName: off-server[\s\S]*?disabled: true/.test(webPatch)) failed.push("the originally disabled web row must stay disabled");
+  // The handover restores the row verbatim: expression intact, managed flag gone.
+  if (!webPatch.includes("url: !!js \"'http://127.0.0.1:1/mcp/'\"")) failed.push("handed-back web row lost its !!js url");
+  if (rowOf(webPatch, "mcp-tavily", "mcp-off").includes("disabled: true")) failed.push("handed-back tavily row must be enabled again");
   const desktopRegistry = await readJson("registry.desktop.json");
   if (desktopRegistry.entries.length !== 1 || desktopRegistry.entries[0].name !== "codegraph") {
     failed.push("desktop registry should still hold only codegraph (no merge from web)");

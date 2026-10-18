@@ -93,6 +93,8 @@ dsh plugin --profile <profile> add dsh-skill-mcp-manager
 
 重启 profile 生效。插件挂在宿主组合里，`mcp_register` / `mcp_load` / `mcp_call` 三件套对该 profile 下所有会话可见；eager 工具由每个会话在自己的上下文中注册，MCP 运行实例按会话独立。
 
+> **表达式说明**：原生行里的 `!!js …` 加载器表达式会被**求值后**用于本插件启动服务器，而补丁里保留**表达式原文**（卸载/切换时逐字交还）。无法求值的表达式行**不会被接管**，原样留在原位（日志有 warn）。
+
 > **接管说明**：`importNativeMcp: true`（默认）时，原生 `dsh-mcp-client` 条目会被导入能力库并在原生层禁用——能力库成为唯一入口（三档、`mcp-catalog`、UI）。卸载插件前先跑 `/mcp prepare-uninstall` 交还条目。
 
 ## 使用

@@ -9,6 +9,8 @@ All notable changes to dsh-skill-mcp-manager (能力库 / Capability) are docume
 ### Fixed
 
 - **DSH Desktop 上认错 profile，界面 SKILL / MCP 两页全空（根因）**：旧实现只从进程 argv 取 `--profile`，而 Desktop 宿主命令行没有这个参数（profile 目录是位置参数），于是回落到 schema 默认值 `web`——reconcile 写的是 `profiles/web/cordis.patch.yml`，desktop 的原生 `dsh-mcp-client` 行从未被导入，注册表也没落盘。现在优先读宿主提供的 `ctx.profileContext`（boot 层 provide 的权威来源，含精确 `patchPath`），`--profile` 与位置参数 `<profilesRoot>/<name>` 仅作兜底。
+- **原生行里的加载器表达式（`!!js …`）在接管时被写成字面字符串**（2026-10-18 真机踩到）：YAML 解析无法求值 `!!js`，`command: !!js process.execPath` 会变成字符串 `"process.execPath"`；用它重新生成托管行等于把表达式换成一条根本跑不起来的命令。现在**行文本逐字回写**（新增 `rawEntryText`），注册表另存**求值后**的值（插件要自己启动服务器）；求值走 YAML 自定义 tag（拿到表达式原文）+ `node:vm` 沙箱（只暴露 `process` 只读视图、`dshHomePath`、`path`，1 秒超时、禁 codegen）；**求值失败的行不接管**、原样留在原位并 warn，绝不拿字面表达式去启动。
+- **行文本不再吞掉尾部的空行/注释**：两条原生行之间的注释描述的是下一行，之前会被卷进上一行的文本、在托管块里重复一份（真实 desktop 补丁实测踩到）。
 - **SKILL 页在 DSH 0.2.0-rc.2 上列不出任何技能**：内建 `dsh-skill-filesystem` 挂在 agent preset 层，而旧实现依赖的 `agentPresets.standingKeyFor()` 在 0.2.0-rc.2 已被移除。改为 `agentPresets.acquireScope(id)` 的租约语义（`{ key, [Symbol.asyncDispose] }`）：list 与每条 get 都在租约内完成、读完释放；API 缺失或抛错时回落全局层，页面照常可用。
 
 ### Added

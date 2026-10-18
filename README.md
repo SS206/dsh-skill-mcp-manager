@@ -94,6 +94,8 @@ Then add one row to that profile's `cordis.patch.yml` (see [`cordis.patch.exampl
 
 Restart the profile. The plugin lives in the Host composition, so the `mcp_register` / `mcp_load` / `mcp_call` trio is visible to every session in that profile; eager tools are registered by each session in its own context, and MCP runtime instances are per-session.
 
+> **Loader expressions:** a native row's `!!js …` expression is **evaluated** for this plugin to launch the server, while the patch keeps the **expression text** (handed back verbatim on switch/uninstall). A row whose expression cannot be evaluated is **not adopted** — it stays native, with a warning in the log.
+
 > **Takeover note:** with `importNativeMcp: true` (default), native `dsh-mcp-client` rows are imported into the capability library and disabled at the native layer — the capability library becomes the single entry point (three tiers, `mcp-catalog`, the UI). Run `/mcp prepare-uninstall` before uninstalling to hand the entries back.
 
 ## Usage
