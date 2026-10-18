@@ -1,17 +1,34 @@
-// Per-tool blacklist smoke test: disabled tools stay visible in the UI view but
-// are hidden from model-facing catalogs/load results, are not registered as
-// eager native tools, and are rejected at both bridge and stale eager execute
-// boundaries. Uses an isolated local stdio MCP server and temp registry.
+// Per-tool switches (v2): an on-demand (proxied) row's disabled tools stay
+// visible in the UI view but are hidden from the model-facing catalog and the
+// mcp_load result, are rejected at the mcp_call boundary, and are persisted in
+// the profile's agent state. A proxied row never registers native
+// mcp__<server>__<tool> tools — the native dsh-mcp-client owns those.
 
-import { mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { apply } from "../lib/index.js";
+import { bootPlugin } from "./helpers/boot.mjs";
 
 const tmp = join(process.cwd(), `.test-tool-disable-${process.pid}`);
-const dataDir = join(tmp, "data");
 const serverPath = join(tmp, "server.mjs");
-await rm(tmp, { recursive: true, force: true });
-await mkdir(dataDir, { recursive: true });
+
+const fixture = await bootPlugin({
+  tmp,
+  rows: [{
+    id: "mcp-demo",
+    serverName: "demo",
+    config: { transport: "stdio", command: process.execPath, args: [serverPath], cwd: process.cwd() },
+    proxied: true,
+    tools: { blocked: false },
+    snapshot: {
+      serverDescription: "test server",
+      tools: [
+        { name: "allowed", description: "Allowed tool" },
+        { name: "blocked", description: "Blocked tool" },
+      ],
+      fetchedAt: "2026-01-01T00:00:00.000Z",
+    },
+  }],
+});
 
 await writeFile(serverPath, `
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -27,217 +44,74 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => ({ content: [
 await server.connect(new StdioServerTransport());
 `, "utf8");
 
-await writeFile(join(dataDir, "registry.__test__.json"), `${JSON.stringify({
-  version: 1,
-  entries: [
-    {
-      id: "demo",
-      name: "demo",
-      tier: "eager",
-      transport: "stdio",
-      command: process.execPath,
-      args: [serverPath],
-      env: {},
-      cwd: process.cwd(),
-      notes: "",
-      tools: [
-        { name: "allowed", description: "Allowed tool" },
-        { name: "blocked", description: "Blocked tool" },
-      ],
-      disabledTools: ["blocked"],
-      serverDescription: "test server",
-      metaFetchedAt: "2026-01-01T00:00:00.000Z",
-    },
-  ],
-}, null, 2)}\n`, "utf8");
-
-const registrations = [];
-const routes = [];
-const effects = [];
-let preStep;
-const ctx = {
-  tools: {
-    register(definition) {
-      const record = { definition, active: true };
-      registrations.push(record);
-      return () => { record.active = false; };
-    },
-  },
-  skills: { registerProvider() { return () => {}; } },
-  on(event, handler) {
-    if (event === "agent/pre-step") preStep = handler;
-    return () => {};
-  },
-  effect(fn) {
-    const disposer = fn();
-    if (typeof disposer === "function") effects.push(disposer);
-    return () => {};
-  },
-  get(name) {
-    if (name === "webServer") return { register(route) { routes.push(route); return () => {}; } };
-    return undefined;
-  },
-  logger: { warn() {}, error() {}, info() {} },
-};
-
-function activeTool(name) {
-  return [...registrations].reverse().find((record) => record.active && record.definition.name === name)?.definition;
-}
-
-function activeNativeNames() {
-  return registrations
-    .filter((record) => record.active && record.definition.name.startsWith("mcp__demo__"))
-    .map((record) => record.definition.name)
-    .sort();
-}
-
-function makeAgent() {
-  return {
-    ctx: {
-      tools: ctx.tools,
-      effect(fn) {
-        const disposer = fn();
-        if (typeof disposer === "function") effects.push(disposer);
-        return () => {};
-      },
-    },
-    session: { surface: { nodes: [] }, events: [] },
-  };
-}
-
-function makeReq(body) {
-  const chunks = [Buffer.from(JSON.stringify(body), "utf8")];
-  let index = 0;
-  return {
-    method: "POST",
-    url: "/skill-mcp-manager/mcp/tool-tier",
-    headers: { origin: "http://127.0.0.1:7404", host: "127.0.0.1:7404" },
-    [Symbol.asyncIterator]() {
-      return { async next() { return index < chunks.length ? { value: chunks[index++], done: false } : { done: true }; } };
-    },
-  };
-}
-
-function makeRes() {
-  const res = { status: 0, body: "" };
-  res.writeHead = (status) => { res.status = status; };
-  res.end = (body) => { res.body = body ?? ""; };
-  return res;
-}
-
-async function setTool(tool, enabled) {
-  const route = routes.find((candidate) => candidate.path === "/skill-mcp-manager/mcp/tool-tier");
-  if (!route) throw new Error("tool-tier route not registered");
-  const res = makeRes();
-  await route.handler(makeReq({ name: "demo", tool, enabled }), res);
-  const body = res.body ? JSON.parse(res.body) : {};
-  if (res.status !== 200) throw new Error(body.error || `tool-tier returned ${res.status}`);
-  return body;
-}
-
 const failed = [];
-try {
-  await apply(ctx, {
-    dataDir,
-    profile: "__test__",
-    importNativeMcp: false,
-    trialTimeoutMs: 5000,
-    toolCallTimeoutMs: 5000,
-  });
+const agent = fixture.makeAgent();
+const enter = async () => ({ kind: "enter", messages: [] });
+await fixture.preStep({ agent, signal: { throwIfAborted() {} } }, enter);
 
-  const agent = makeAgent();
-  await preStep(
-    { agent, signal: { throwIfAborted() {} } },
-    async () => ({ kind: "enter", messages: [] }),
-  );
+const mcpLoad = fixture.tool("mcp_load");
+const mcpCall = fixture.tool("mcp_call");
+if (!mcpLoad || !mcpCall) failed.push("required tool definitions missing");
 
-  const initialNative = activeNativeNames();
-  if (initialNative.join(",") !== "mcp__demo__allowed") {
-    failed.push(`initial eager tools should only contain allowed, got ${initialNative.join(",")}`);
-  }
+// A proxied row must not produce plugin-registered native tools.
+const nativeNames = fixture.registrations
+  .filter((record) => record.active && record.definition.name.startsWith("mcp__demo__"))
+  .map((record) => record.definition.name);
+if (nativeNames.length !== 0) failed.push(`proxied row registered native tools: ${nativeNames.join(",")}`);
 
-  const staleAllowed = activeTool("mcp__demo__allowed");
-  const mcpRegister = activeTool("mcp_register");
-  const mcpLoad = activeTool("mcp_load");
-  const mcpCall = activeTool("mcp_call");
-  if (!mcpRegister || !mcpLoad || !mcpCall || !staleAllowed) failed.push("required tool definitions missing");
-
-  if (mcpLoad) {
-    const peek = await mcpLoad.execute({ name: "demo", peek: true });
-    if (!peek.text.includes("allowed")) failed.push("mcp_load peek hid enabled tool");
-    if (peek.text.includes("blocked")) failed.push("mcp_load peek exposed disabled tool");
-  }
-
-  if (mcpCall) {
-    let blockedError = "";
-    try {
-      await mcpCall.execute({ name: "demo", tool: "blocked", args: {} }, { signal: new AbortController().signal, agent });
-    } catch (error) {
-      blockedError = String(error?.message ?? error);
-    }
-    if (!/disabled/.test(blockedError)) failed.push(`mcp_call did not reject disabled tool: ${blockedError}`);
-    const allowedArgs = { name: "demo", tool: "allowed", args: {} };
-    const allowed = await mcpCall.execute(allowedArgs, { signal: new AbortController().signal, agent });
-    const allowedText = mcpCall.output.render(allowedArgs, allowed).map((block) => block.text ?? "").join("\n");
-    if (allowedText !== "called allowed") failed.push(`enabled bridge call failed: ${allowedText}`);
-  }
-
-  const enabledBody = await setTool("blocked", true);
-  const enabledView = enabledBody.entry?.tools?.find((tool) => tool.name === "blocked");
-  if (enabledView?.enabled !== true) failed.push("UI route did not mark blocked tool enabled");
-  if (activeNativeNames().join(",") !== "mcp__demo__allowed,mcp__demo__blocked") {
-    failed.push(`enabling did not re-register both eager tools: ${activeNativeNames().join(",")}`);
-  }
-
-  const disabledBody = await setTool("allowed", false);
-  const disabledView = disabledBody.entry?.tools?.find((tool) => tool.name === "allowed");
-  if (disabledView?.enabled !== false) failed.push("UI route did not mark allowed tool disabled");
-  if (activeNativeNames().join(",") !== "mcp__demo__blocked") {
-    failed.push(`disabling did not remove eager allowed tool: ${activeNativeNames().join(",")}`);
-  }
-
-  if (staleAllowed) {
-    let staleError = "";
-    try {
-      await staleAllowed.execute({}, { signal: new AbortController().signal });
-    } catch (error) {
-      staleError = String(error?.message ?? error);
-    }
-    if (!/disabled/.test(staleError)) failed.push(`stale eager execute bypassed blacklist: ${staleError}`);
-  }
-
-  const result = await preStep(
-    { agent, signal: { throwIfAborted() {} } },
-    async () => ({ kind: "enter", messages: [] }),
-  );
-  const catalog = JSON.stringify(result.messages);
-  if (!catalog.includes("blocked")) failed.push("catalog hid enabled tool after toggle");
-  if (catalog.includes("allowed")) failed.push("catalog exposed disabled tool after toggle");
-
-  let registry = JSON.parse(await readFile(join(dataDir, "registry.__test__.json"), "utf8"));
-  let disabledTools = registry.entries[0]?.disabledTools ?? [];
-  if (disabledTools.join(",") !== "allowed") failed.push(`registry blacklist not persisted: ${disabledTools.join(",")}`);
-
-  if (mcpRegister) {
-    await mcpRegister.execute({
-      name: "demo",
-      tier: "eager",
-      notes: "updated by model-facing tool",
-      disabledTools: [],
-    });
-    registry = JSON.parse(await readFile(join(dataDir, "registry.__test__.json"), "utf8"));
-    disabledTools = registry.entries[0]?.disabledTools ?? [];
-    if (disabledTools.join(",") !== "allowed") {
-      failed.push(`mcp_register changed the UI-owned blacklist: ${disabledTools.join(",")}`);
-    }
-    if (activeNativeNames().join(",") !== "mcp__demo__blocked") {
-      failed.push(`mcp_register update re-enabled a blacklisted eager tool: ${activeNativeNames().join(",")}`);
-    }
-  }
-} finally {
-  for (const dispose of effects.reverse()) await dispose();
-  await rm(tmp, { recursive: true, force: true });
+if (mcpLoad) {
+  const peek = await mcpLoad.execute({ name: "demo", peek: true });
+  if (!peek.text.includes("allowed")) failed.push("mcp_load peek hid enabled tool");
+  if (peek.text.includes("blocked")) failed.push("mcp_load peek exposed disabled tool");
 }
+
+if (mcpCall) {
+  // The bridge is lazy: load the row for this session before calling a tool.
+  await mcpLoad.execute({ name: "demo" }, { agent });
+  let blockedError = "";
+  try {
+    await mcpCall.execute({ name: "demo", tool: "blocked", args: {} }, { signal: new AbortController().signal, agent });
+  } catch (error) {
+    blockedError = String(error?.message ?? error);
+  }
+  if (!/disabled/.test(blockedError)) failed.push(`mcp_call did not reject disabled tool: ${blockedError}`);
+  const allowedArgs = { name: "demo", tool: "allowed", args: {} };
+  const allowed = await mcpCall.execute(allowedArgs, { signal: new AbortController().signal, agent });
+  const allowedText = mcpCall.output.render(allowedArgs, allowed).map((block) => block.text ?? "").join("\n");
+  if (allowedText !== "called allowed") failed.push(`enabled bridge call failed: ${allowedText}`);
+}
+
+// UI switch: enable the blocked tool, then disable the allowed one.
+const enableBlocked = await fixture.callRoute("/skill-mcp-manager/mcp/tool-tier", "POST", { rowId: "mcp-demo", tool: "blocked", enabled: true });
+if (enableBlocked.status !== 200) failed.push(`tool-tier enable failed: ${enableBlocked.json?.error ?? enableBlocked.status}`);
+if (mcpLoad) {
+  const peek = await mcpLoad.execute({ name: "demo", peek: true });
+  if (!peek.text.includes("allowed") || !peek.text.includes("blocked")) failed.push("enabling did not restore the blocked tool");
+}
+const disableAllowed = await fixture.callRoute("/skill-mcp-manager/mcp/tool-tier", "POST", { rowId: "mcp-demo", tool: "allowed", enabled: false });
+if (disableAllowed.status !== 200) failed.push(`tool-tier disable failed: ${disableAllowed.json?.error ?? disableAllowed.status}`);
+
+const persisted = await fixture.readAgents();
+if (persisted?.rows?.["mcp-demo"]?.tools?.allowed !== false) {
+  failed.push(`tool switch was not persisted: ${JSON.stringify(persisted?.rows)}`);
+}
+if (persisted?.rows?.["mcp-demo"]?.tools?.blocked !== undefined) {
+  failed.push("re-enabled tool kept a stale false entry");
+}
+
+// Catalog reflects the switches on the next pre-step.
+const result = await fixture.preStep({ agent, signal: { throwIfAborted() {} } }, enter);
+const catalog = JSON.stringify(result.messages);
+if (!catalog.includes("blocked")) failed.push("catalog hid the re-enabled tool");
+if (catalog.includes("allowed")) failed.push("catalog exposed the disabled tool");
+
+// The switch route refuses a row that is not proxied.
+const tier = await fixture.callRoute("/skill-mcp-manager/mcp/tier", "POST", { rowId: "mcp-demo", tier: "native" });
+if (tier.status !== 200) failed.push(`tier switch to native failed: ${tier.json?.error ?? tier.status}`);
+const refuse = await fixture.callRoute("/skill-mcp-manager/mcp/tool-tier", "POST", { rowId: "mcp-demo", tool: "allowed", enabled: true });
+if (refuse.status === 200) failed.push("tool-tier accepted a row that is no longer proxied");
+
+await fixture.cleanup();
 
 if (failed.length > 0) {
   for (const item of failed) console.log("FAIL:", item);

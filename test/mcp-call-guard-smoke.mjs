@@ -1,23 +1,42 @@
-// mcp_call parameter-shape guard + tool-call error context smoke test.
+// mcp_call parameter-shape guard + tool-call error context smoke test (v2).
 // Verifies that:
 //   1. well-shaped bridge calls still succeed (incl. omitted args for no-arg tools);
 //   2. nested/malformed mcp_call parameters are rejected early with the correct
 //      shape spelled out (never auto-unwrapped) instead of reaching the server
 //      as params.name=undefined and dying as an opaque -32602;
-//   3. protocol-level tool-call failures (server-side JSON-RPC errors) carry
-//      the call context (server/tool, arguments sent, inputSchema) on both the
-//      on-demand bridge and the eager native execute path.
-// Uses an isolated local stdio MCP server and a temp registry.
+//   3. protocol-level tool-call failures (server-side JSON-RPC errors) and
+//      isError results carry the call context (server/tool, arguments sent,
+//      inputSchema) on the on-demand bridge;
+//   4. a native-tier row is not callable through the bridge at all.
+// Uses an isolated local stdio MCP server and a temp profile.
 
-import { mkdir, writeFile, rm } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { apply } from "../lib/index.js";
+import { bootPlugin } from "./helpers/boot.mjs";
 
 const tmp = join(process.cwd(), `.test-mcp-call-guard-${process.pid}`);
-const dataDir = join(tmp, "data");
 const serverPath = join(tmp, "server.mjs");
-await rm(tmp, { recursive: true, force: true });
-await mkdir(dataDir, { recursive: true });
+
+const toolsSnapshot = ["echo", "noargs", "fail", "softfail"].map((name) => ({ name, description: name }));
+
+const fixture = await bootPlugin({
+  tmp,
+  rows: [
+    {
+      id: "mcp-demo",
+      serverName: "demo",
+      config: { transport: "stdio", command: process.execPath, args: [serverPath], cwd: process.cwd() },
+      proxied: true,
+      snapshot: { serverDescription: "test server", tools: toolsSnapshot, fetchedAt: "2026-01-01T00:00:00.000Z" },
+    },
+    {
+      id: "mcp-native",
+      serverName: "nativebridge",
+      config: { transport: "stdio", command: process.execPath, args: [serverPath], cwd: process.cwd() },
+      snapshot: { serverDescription: "test server", tools: toolsSnapshot, fetchedAt: "2026-01-01T00:00:00.000Z" },
+    },
+  ],
+});
 
 await writeFile(serverPath, `
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -41,78 +60,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 await server.connect(new StdioServerTransport());
 `, "utf8");
 
-function entry(id, tier) {
-  return {
-    id,
-    name: id,
-    tier,
-    transport: "stdio",
-    command: process.execPath,
-    args: [serverPath],
-    env: {},
-    cwd: process.cwd(),
-    notes: "",
-    tools: [
-      { name: "echo", description: "Echo tool" },
-      { name: "noargs", description: "No-arg tool" },
-      { name: "fail", description: "Always fails server-side" },
-      { name: "softfail", description: "Returns an isError result" },
-    ],
-    serverDescription: "test server",
-    metaFetchedAt: "2026-01-01T00:00:00.000Z",
-  };
-}
-
-await writeFile(join(dataDir, "registry.__test__.json"), `${JSON.stringify({
-  version: 1,
-  entries: [entry("demo", "on-demand"), entry("eagerdemo", "eager")],
-}, null, 2)}\n`, "utf8");
-
-const registrations = [];
-const effects = [];
-let preStep;
-const ctx = {
-  tools: {
-    register(definition) {
-      const record = { definition, active: true };
-      registrations.push(record);
-      return () => { record.active = false; };
-    },
-  },
-  skills: { registerProvider() { return () => {}; } },
-  on(event, handler) {
-    if (event === "agent/pre-step") preStep = handler;
-    return () => {};
-  },
-  effect(fn) {
-    const disposer = fn();
-    if (typeof disposer === "function") effects.push(disposer);
-    return () => {};
-  },
-  get() {
-    return undefined;
-  },
-  logger: { warn() {}, error() {}, info() {} },
-};
-
-function activeTool(name) {
-  return [...registrations].reverse().find((record) => record.active && record.definition.name === name)?.definition;
-}
-
-function makeAgent() {
-  return {
-    ctx: {
-      tools: ctx.tools,
-      effect(fn) {
-        const disposer = fn();
-        if (typeof disposer === "function") effects.push(disposer);
-        return () => {};
-      },
-    },
-    session: { surface: { nodes: [] }, events: [] },
-  };
-}
-
 async function expectError(promise, patterns, label) {
   try {
     await promise;
@@ -126,106 +73,67 @@ async function expectError(promise, patterns, label) {
   }
 }
 
-const exec = (agent) => ({ signal: new AbortController().signal, agent });
-
-function modelText(tool, args, value) {
-  return tool.output.render(args, value).map((block) => block.text ?? "").join("\n");
-}
 const failed = [];
-try {
-  await apply(ctx, {
-    dataDir,
-    profile: "__test__",
-    importNativeMcp: false,
-    trialTimeoutMs: 5000,
-    toolCallTimeoutMs: 5000,
-  });
+const agent = fixture.makeAgent();
+const exec = (target = agent) => ({ signal: new AbortController().signal, agent: target });
+const modelText = (tool, args, value) => tool.output.render(args, value).map((block) => block.text ?? "").join("\n");
 
-  const agent = makeAgent();
-  await preStep(
-    { agent, signal: { throwIfAborted() {} } },
-    async () => ({ kind: "enter", messages: [] }),
-  );
+await fixture.preStep({ agent, signal: { throwIfAborted() {} } }, async () => ({ kind: "enter", messages: [] }));
 
-  const mcpLoad = activeTool("mcp_load");
-  const mcpCall = activeTool("mcp_call");
-  if (!mcpLoad || !mcpCall) { failed.push("mcp_load/mcp_call definitions missing"); }
-  else {
-    await mcpLoad.execute({ name: "demo" }, exec(agent));
+const mcpLoad = fixture.tool("mcp_load");
+const mcpCall = fixture.tool("mcp_call");
+if (!mcpLoad || !mcpCall) failed.push("mcp_load/mcp_call definitions missing");
+else {
+  await mcpLoad.execute({ name: "demo" }, exec());
 
-    // 1. well-shaped calls still work
-    const echoArgs = { name: "demo", tool: "echo", args: { msg: "hi" } };
-    const echoed = modelText(mcpCall, echoArgs, await mcpCall.execute(echoArgs, exec(agent)));
-    if (!echoed.includes("called echo") || !echoed.includes("hi")) {
-      failed.push(`well-shaped bridge call regressed: ${echoed}`);
-    }
-    const noArgCall = { name: "demo", tool: "noargs" };
-    const noargs = modelText(mcpCall, noArgCall, await mcpCall.execute(noArgCall, exec(agent)));
-    if (!noargs.includes("called noargs")) {
-      failed.push(`omitted-args bridge call regressed: ${noargs}`);
-    }
+  // 1. well-shaped calls still work
+  const echoArgs = { name: "demo", tool: "echo", args: { msg: "hi" } };
+  const echoed = modelText(mcpCall, echoArgs, await mcpCall.execute(echoArgs, exec()));
+  if (!echoed.includes("called echo") || !echoed.includes("hi")) failed.push(`well-shaped bridge call regressed: ${echoed}`);
+  const noArgCall = { name: "demo", tool: "noargs" };
+  const noargs = modelText(mcpCall, noArgCall, await mcpCall.execute(noArgCall, exec()));
+  if (!noargs.includes("called noargs")) failed.push(`omitted-args bridge call regressed: ${noargs}`);
 
-    // 2. malformed shapes are rejected with the correct shape, no auto-unwrap
-    failed.push(await expectError(
-      mcpCall.execute({ name: "demo", args: { tool: "echo", args: { msg: "hi" } } }, exec(agent)),
-      [/nested inside "args"/, /TOP-LEVEL/],
-      "nested shape",
-    ));
-    failed.push(await expectError(
-      mcpCall.execute({ name: "demo" }, exec(agent)),
-      [/requires a top-level "tool" string field/],
-      "missing tool",
-    ));
-    failed.push(await expectError(
-      mcpCall.execute({ name: "demo", tool: "echo", args: "oops" }, exec(agent)),
-      [/"args" must be an object/],
-      "non-object args",
-    ));
+  // 2. malformed shapes are rejected with the correct shape, no auto-unwrap
+  failed.push(await expectError(
+    mcpCall.execute({ name: "demo", args: { tool: "echo", args: { msg: "hi" } } }, exec()),
+    [/nested inside "args"/, /TOP-LEVEL/],
+    "nested shape",
+  ));
+  failed.push(await expectError(
+    mcpCall.execute({ name: "demo" }, exec()),
+    [/requires a top-level "tool" string field/],
+    "missing tool",
+  ));
+  failed.push(await expectError(
+    mcpCall.execute({ name: "demo", tool: "echo", args: "oops" }, exec()),
+    [/"args" must be an object/],
+    "non-object args",
+  ));
 
-    // 3a. bridge path: server-side JSON-RPC failure carries call context
-    failed.push(await expectError(
-      mcpCall.execute({ name: "demo", tool: "fail", args: { x: 1 } }, exec(agent)),
-      [/called MCP tool: demo\/fail/, /arguments sent: \{"x":1\}/, /tool inputSchema: \{/],
-      "bridge error context",
-    ));
+  // 3. server-side JSON-RPC failure carries the call context
+  failed.push(await expectError(
+    mcpCall.execute({ name: "demo", tool: "fail", args: { x: 1 } }, exec()),
+    [/called MCP tool: demo\/fail/, /arguments sent: \{"x":1\}/, /tool inputSchema: \{/],
+    "bridge error context",
+  ));
 
-    // 3a'. bridge path: isError tool results (business failures) carry the same context
-    failed.push(await expectError(
-      mcpCall.execute({ name: "demo", tool: "softfail", args: { q: 9 } }, exec(agent)),
-      [/soft failure: bad thing happened/, /called MCP tool: demo\/softfail/, /arguments sent: \{"q":9\}/],
-      "bridge isError context",
-    ));
-  }
+  // 3'. isError tool results carry the same context
+  failed.push(await expectError(
+    mcpCall.execute({ name: "demo", tool: "softfail", args: { q: 9 } }, exec()),
+    [/soft failure: bad thing happened/, /called MCP tool: demo\/softfail/, /arguments sent: \{"q":9\}/],
+    "bridge isError context",
+  ));
 
-  // 3b. eager path: same context on the native execute boundary
-  const eagerFail = activeTool("mcp__eagerdemo__fail");
-  if (!eagerFail) failed.push("eager fail tool not registered");
-  else {
-    failed.push(await expectError(
-      eagerFail.execute({ y: 2 }, exec(agent)),
-      [/called MCP tool: eagerdemo\/fail/, /arguments sent: \{"y":2\}/, /tool inputSchema: \{/],
-      "eager error context",
-    ));
-    const eagerEcho = activeTool("mcp__eagerdemo__echo");
-    const echoArgs = { msg: "hey" };
-    const ok = modelText(eagerEcho, echoArgs, await eagerEcho.execute(echoArgs, exec(agent)));
-    if (!ok.includes("called echo")) failed.push(`eager echo regressed: ${ok}`);
-
-    // 3b'. eager path: isError tool results carry the same context
-    const eagerSoftfail = activeTool("mcp__eagerdemo__softfail");
-    if (!eagerSoftfail) failed.push("eager softfail tool not registered");
-    else {
-      failed.push(await expectError(
-        eagerSoftfail.execute({ z: 3 }, exec(agent)),
-        [/soft failure: bad thing happened/, /called MCP tool: eagerdemo\/softfail/, /arguments sent: \{"z":3\}/],
-        "eager isError context",
-      ));
-    }
-  }
-} finally {
-  for (const dispose of effects.reverse()) await dispose();
-  await rm(tmp, { recursive: true, force: true });
+  // 4. a native-tier row is not callable through the bridge
+  failed.push(await expectError(
+    mcpCall.execute({ name: "nativebridge", tool: "echo", args: { msg: "x" } }, exec()),
+    [/native tier/],
+    "native row through the bridge",
+  ));
 }
+
+await fixture.cleanup();
 
 const realFailures = failed.filter((item) => item !== null);
 if (realFailures.length > 0) {

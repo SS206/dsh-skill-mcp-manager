@@ -6,14 +6,19 @@ import { mkdir, writeFile, readFile, rm, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { hostname } from "node:os";
 import { readFileSync } from "node:fs";
-import { apply, PLUGIN_VERSION, pruneBackups } from "../lib/index.js";
-import { scrubParentEnv, resolveExplicitEnv, childEnv } from "../lib/child-env.js";
-import { hostPermitted, requestPermitted } from "../lib/ui.js";
 
 const tmp = join(process.cwd(), ".test-data", "security-smoke-" + process.pid);
+const home = join(tmp, "home");
 const failed = [];
 await rm(tmp, { recursive: true, force: true });
-await mkdir(tmp, { recursive: true });
+await mkdir(join(home, "profiles", "__test__"), { recursive: true });
+await writeFile(join(home, "profiles", "__test__", "cordis.patch.yml"), "[]\n", "utf8");
+// The plugin resolves DSH_HOME at import time and writes the booted profile's
+// patch: redirect it before the import so the run never touches the real home.
+process.env.DSH_HOME = home;
+const { apply, PLUGIN_VERSION, pruneBackups } = await import("../lib/index.js");
+const { scrubParentEnv, resolveExplicitEnv, childEnv } = await import("../lib/child-env.js");
+const { hostPermitted, requestPermitted } = await import("../lib/ui.js");
 
 function check(condition, message) {
   if (!condition) failed.push(message);
@@ -229,8 +234,10 @@ async function dispose(effects) {
   );
   const unknown = await mcp.handler({ rawInput: "nope" });
   check(unknown.kind === "error" && unknown.text.includes("prepare-uninstall"), `unknown /mcp did not explain usage: ${unknown.text}`);
+  // v2 prepare-uninstall drops this plugin's overrides and agent state; with no
+  // patch and no state it is a clean no-op instead of a read failure.
   const handed = await mcp.handler({ rawInput: "prepare-uninstall" });
-  check(handed.kind === "error" && /cannot read/.test(handed.text), `prepare-uninstall did not run: ${handed.text}`);
+  check(handed.kind === "success" && /Removed 0 override/.test(handed.text), `prepare-uninstall did not run: ${handed.text}`);
   await dispose(effects);
 }
 
@@ -374,148 +381,158 @@ async function dispose(effects) {
   await dispose(effects);
 }
 
-// Eager: unchanged config does not remount; a failed connect is not retried.
+// Lazy bridge (v2): the pre-step advertises every row without launching
+// anything. A native row belongs to the dsh-mcp-client; a proxied (on-demand)
+// row connects only when mcp_load asks for it, and a failing server is not
+// retried by later turns.
 {
-  const dataDir = join(tmp, "eager");
+  const dataDir = join(tmp, "lazy-bridge");
+  const startLog = join(tmp, "starts.log");
   await mkdir(dataDir, { recursive: true });
-  await writeFile(join(dataDir, "registry.__test__.json"), `${JSON.stringify({
-    version: 1,
-    entries: [{
-      id: "demo",
-      name: "demo",
-      tier: "eager",
-      transport: "stdio",
-      command: process.execPath,
-      args: [serverPath],
-      env: {},
-      cwd: tmp,
-      notes: "",
-      tools: [{ name: "ping", description: "ping" }],
-      disabledTools: [],
-      serverDescription: "demo",
-      metaFetchedAt: "2026-01-01T00:00:00.000Z",
-    }],
-  }, null, 2)}\n`, "utf8");
-  const native = [];
-  const routes = [];
-  const effects = [];
-  let preStep;
-  const ctx = {
-    tools: { register() { return () => {}; } },
-    skills: { registerProvider() { return () => {}; } },
-    on(event, handler) {
-      if (event === "agent/pre-step") preStep = handler;
-      return () => {};
-    },
-    effect(fn) {
-      const disposer = fn();
-      if (typeof disposer === "function") effects.push(disposer);
-      return () => {};
-    },
-    get(name) {
-      if (name === "webServer") return { register(route) { routes.push(route); return () => {}; } };
-      return undefined;
-    },
-    logger: { warn() {}, error() {}, info() {} },
-  };
-  await apply(ctx, { dataDir, profile: "__test__", importNativeMcp: false, trialTimeoutMs: 5000, toolCallTimeoutMs: 5000 });
-  const agent = {
-    session: { seq: 0, surface: { nodes: [] }, eventAt() { return undefined; } },
-    ctx: {
-      tools: {
-        register(definition) {
-          native.push(definition.name);
-          return () => {};
-        },
+  const lazyServer = join(tmp, "lazy-server.mjs");
+  await writeFile(lazyServer, `
+import { appendFileSync } from "node:fs";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+appendFileSync(${JSON.stringify(startLog)}, "x\\n");
+const server = new Server({ name: "lazy", version: "1.0.0" }, { capabilities: { tools: {} } });
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "ping", description: "ping", inputSchema: { type: "object", additionalProperties: false } }] }));
+await server.connect(new StdioServerTransport());
+`, "utf8");
+
+  function row(id, serverName, command, args) {
+    return [
+      "- insert:",
+      `    - id: ${id}`,
+      "      name: '@deepseek-ai/dsh-mcp-client'",
+      "      config:",
+      `        serverName: ${serverName}`,
+      "        transport: stdio",
+      `        command: ${JSON.stringify(command)}`,
+      "        args:",
+      ...args.map((item) => `          - ${JSON.stringify(item)}`),
+      "",
+    ].join("\n");
+  }
+  const patchPath = join(home, "profiles", "__test__", "cordis.patch.yml");
+  await writeFile(patchPath, [
+    row("mcp-native", "nativeone", process.execPath, [lazyServer]),
+    row("mcp-proxied", "proxiedone", process.execPath, [lazyServer]),
+    '- id: "mcp-proxied"',
+    "  disabled: true",
+    "",
+  ].join("\n"), "utf8");
+  await writeFile(
+    join(dataDir, "agents.__test__.json"),
+    `${JSON.stringify({ version: 1, rows: { "mcp-proxied": { tools: {} } }, snapshots: {}, notes: {} }, null, 2)}\n`,
+    "utf8",
+  );
+
+  function makeHarness() {
+    const routes = [];
+    const tools = [];
+    const effects = [];
+    let preStep;
+    const ctx = {
+      tools: { register(definition) { tools.push(definition); return () => {}; } },
+      skills: { registerProvider() { return () => {}; } },
+      on(event, handler) {
+        if (event === "agent/pre-step") preStep = handler;
+        return () => {};
       },
-    },
+      effect(fn) {
+        const disposer = fn();
+        if (typeof disposer === "function") effects.push(disposer);
+        return () => {};
+      },
+      get(name) {
+        if (name === "webServer") return { register(route) { routes.push(route); return () => {}; } };
+        return undefined;
+      },
+      logger: { warn() {}, error() {}, info() {} },
+    };
+    return { ctx, routes, tools, effects, preStep: () => preStep };
+  }
+  const logLines = async (path) => {
+    try {
+      return (await readFile(path, "utf8")).trim().split(/\n/).filter(Boolean).length;
+    } catch {
+      return 0;
+    }
   };
-  const signal = { throwIfAborted() {} };
-  const enter = async () => ({ kind: "enter", messages: [] });
-  await preStep({ agent, signal }, enter);
-  const afterFirst = native.length;
-  check(afterFirst === 1 && native[0] === "mcp__demo__ping", `eager did not mount once: ${native.join(",")}`);
-  await preStep({ agent, signal }, enter);
-  check(native.length === afterFirst, `second turn remounted eager tools: ${native.join(",")}`);
 
-  await writeFile(join(dataDir, "registry.__test__.json"), `${JSON.stringify({
-    version: 1,
-    entries: [{
-      id: "down",
-      name: "down",
-      tier: "eager",
-      transport: "stdio",
-      command: process.execPath,
-      args: [failPath, failLog],
-      env: {},
-      notes: "",
-      tools: [{ name: "ping", description: "ping" }],
-      disabledTools: [],
-      serverDescription: "down",
-      metaFetchedAt: "2026-01-01T00:00:00.000Z",
-    }],
-  }, null, 2)}\n`, "utf8");
-  await dispose(effects);
-}
-
-{
-  const dataDir = join(tmp, "eager-down");
-  await mkdir(dataDir, { recursive: true });
-  await writeFile(join(dataDir, "registry.__test__.json"), `${JSON.stringify({
-    version: 1,
-    entries: [{
-      id: "down",
-      name: "down",
-      tier: "eager",
-      transport: "stdio",
-      command: process.execPath,
-      args: [failPath, failLog],
-      env: {},
-      notes: "",
-      tools: [{ name: "ping", description: "ping" }],
-      disabledTools: [],
-      serverDescription: "down",
-      metaFetchedAt: "2026-01-01T00:00:00.000Z",
-    }],
-  }, null, 2)}\n`, "utf8");
-  const routes = [];
-  const effects = [];
-  let preStep;
-  const ctx = {
-    tools: { register() { return () => {}; } },
-    skills: { registerProvider() { return () => {}; } },
-    on(event, handler) {
-      if (event === "agent/pre-step") preStep = handler;
-      return () => {};
-    },
-    effect(fn) {
-      const disposer = fn();
-      if (typeof disposer === "function") effects.push(disposer);
-      return () => {};
-    },
-    get(name) {
-      if (name === "webServer") return { register(route) { routes.push(route); return () => {}; } };
-      return undefined;
-    },
-    logger: { warn() {}, error() {}, info() {} },
-  };
-  await apply(ctx, { dataDir, profile: "__test__", importNativeMcp: false, trialTimeoutMs: 5000 });
+  const runOne = makeHarness();
+  await apply(runOne.ctx, { dataDir, profile: "__test__", trialTimeoutMs: 5000 });
   const agent = {
     session: { seq: 0, surface: { nodes: [] }, eventAt() { return undefined; } },
     ctx: { tools: { register() { return () => {}; } } },
   };
   const signal = { throwIfAborted() {} };
-  const first = await preStep({ agent, signal }, async () => ({ kind: "enter", messages: [] }));
+  const enter = async () => ({ kind: "enter", messages: [] });
+  const first = await runOne.preStep()({ agent, signal }, enter);
   const text = first.messages?.[0]?.content?.[0]?.text ?? "";
-  check(text.includes("`down` (on-demand)"), `failed eager was still advertised as mounted: ${text}`);
-  const listed = await callRoute(routes, "/skill-mcp-manager/mcp", "GET", { origin: "http://127.0.0.1:9", host: "127.0.0.1:9" });
-  check(listed.body.entries?.[0]?.connectFailed === true && listed.body.entries?.[0]?.tier === "eager", `UI did not keep eager + failed: ${JSON.stringify(listed.body.entries?.[0])}`);
-  const started = Date.now();
-  await preStep({ agent, signal }, async () => ({ kind: "enter", messages: [] }));
-  check(Date.now() - started < 1000, "failed eager was retried on the next turn");
-  const lines = (await readFile(failLog, "utf8")).trim().split(/\n/).filter(Boolean);
-  check(lines.length === 1, `failed command ran ${lines.length} times`);
-  await dispose(effects);
+  check(text.includes("nativeone") && text.includes("proxiedone"), `the catalog is missing rows: ${text}`);
+  check((await logLines(startLog)) === 0, "the pre-step launched an MCP process");
+
+  const mcpLoad = runOne.tools.find((tool) => tool.name === "mcp_load");
+  await mcpLoad.execute({ name: "proxiedone" }, { agent, signal });
+  const afterLoad = await logLines(startLog);
+  check(afterLoad === 1, `mcp_load started ${afterLoad} process(es)`);
+  await runOne.preStep()({ agent, signal }, enter);
+  check((await logLines(startLog)) === 1, "a later turn started another process");
+
+  let nativeError = "";
+  try {
+    await mcpLoad.execute({ name: "nativeone" }, { agent, signal });
+  } catch (error) {
+    nativeError = String(error?.message ?? error);
+  }
+  check(/native tier/.test(nativeError), `the bridge did not refuse a native row: ${nativeError}`);
+  await dispose(runOne.effects);
+
+  // A server that dies on startup: the failure surfaces at mcp_load, and the
+  // pre-step never retries it (nothing is launched outside a load).
+  const failingDir = join(tmp, "lazy-failing");
+  await mkdir(failingDir, { recursive: true });
+  const failCount = await logLines(failLog);
+  await writeFile(patchPath, [
+    row("mcp-down", "down", process.execPath, [failPath, failLog]),
+    '- id: "mcp-down"',
+    "  disabled: true",
+    "",
+  ].join("\n"), "utf8");
+  await writeFile(
+    join(failingDir, "agents.__test__.json"),
+    `${JSON.stringify({ version: 1, rows: { "mcp-down": { tools: {} } }, snapshots: {}, notes: {} }, null, 2)}\n`,
+    "utf8",
+  );
+  const failing = makeHarness();
+  await apply(failing.ctx, { dataDir: failingDir, profile: "__test__", trialTimeoutMs: 3000 });
+  const downAgent = {
+    session: { seq: 0, surface: { nodes: [] }, eventAt() { return undefined; } },
+    ctx: { tools: { register() { return () => {}; } } },
+  };
+  await failing.preStep()({ agent: downAgent, signal }, enter);
+  check((await logLines(failLog)) === failCount, "the pre-step started a failing server");
+  const downLoad = failing.tools.find((tool) => tool.name === "mcp_load");
+  let downError = "";
+  try {
+    await downLoad.execute({ name: "down" }, { agent: downAgent, signal });
+  } catch (error) {
+    downError = String(error?.message ?? error);
+  }
+  check(downError !== "", "a failing server did not surface an error at mcp_load");
+  const afterFail = await logLines(failLog);
+  const startedAt = Date.now();
+  await failing.preStep()({ agent: downAgent, signal }, enter);
+  check(Date.now() - startedAt < 1000, "the pre-step blocked on the failing server");
+  check((await logLines(failLog)) === afterFail, "the failing server was retried by the pre-step");
+
+  const listed = await callRoute(failing.routes, "/skill-mcp-manager/inventory", "GET", { origin: "http://127.0.0.1:9", host: "127.0.0.1:9" });
+  const down = (listed.body.rows ?? []).find((entry) => entry.serverName === "down");
+  check(down?.tier === "on-demand", `the UI lost the row's tier: ${JSON.stringify(down)}`);
+  await dispose(failing.effects);
 }
 
 await rm(tmp, { recursive: true, force: true });

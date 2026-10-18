@@ -4,11 +4,21 @@
 // (2) skill listing marks shipped/read-only skills, and (3) toggle/delete are
 // refused for read-only skills. No live DSH or filesystem writes required.
 
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { apply } from "../lib/index.js";
 
-const dataDir = join(dirname(fileURLToPath(import.meta.url)), "..", ".test-data");
+const here = dirname(fileURLToPath(import.meta.url));
+const dataDir = join(here, "..", ".test-data");
+// The plugin resolves DSH_HOME at import time and reads the profile list from
+// it: give the synthetic __test__ profile a real directory so the candidate
+// list (and its booted flag) is deterministic and the run never touches the
+// real home.
+const home = join(here, "..", ".test-data", "ui-smoke-home");
+await mkdir(join(home, "profiles", "__test__"), { recursive: true });
+await writeFile(join(home, "profiles", "__test__", "cordis.patch.yml"), "[]\n", "utf8");
+process.env.DSH_HOME = home;
+const { apply } = await import("../lib/index.js");
 
 const tools = [];
 const routes = [];
@@ -244,31 +254,38 @@ for (const path of ["/skill-mcp-manager/skills", "/skill-mcp-manager/skills/togg
   }
 }
 
-// Managed-profile route: the host resolves the target, reports the candidates,
-// and the settings payload exposes the stored choice. A settings POST must not
-// be able to move the target — that is the profile route's job.
+// Profile route (v2): the host reports the BOOTED profile and the display view,
+// and lists the candidate profiles. Changing the view is a display preference —
+// it has its own route, and a settings POST must not be able to move it.
 {
   const res = makeRes();
   await routeByPath("/skill-mcp-manager/profile").handler(makeReq("GET", "/skill-mcp-manager/profile"), res);
   const body = bodyOf(res);
-  console.log("profile target:", body.target?.name, body.target?.source, "| choice:", JSON.stringify(body.choice));
+  console.log("booted profile:", body.booted?.name, "| view:", JSON.stringify(body.view));
   if (res.status !== 200) failed.push("profile GET status != 200");
-  if (body.target?.name !== "__test__") failed.push("profile target should follow the configured profile");
-  if (body.target?.source !== "config") failed.push("profile source should be config for an explicit profile");
-  if (body.choice !== "") failed.push("an unset choice should be reported as an empty string");
+  if (body.booted?.name !== "__test__") failed.push("the booted profile should follow the configured profile");
+  if (body.view !== "__test__") failed.push("the default view should follow the booted profile");
   if (!Array.isArray(body.profiles)) failed.push("profile GET must list candidate profiles");
-  if (typeof body.target?.registryFile !== "string") failed.push("profile GET must report the registry file");
+  if (body.profiles.find((item) => item.name === "__test__")?.booted !== true) failed.push("the booted candidate was not flagged");
 
   const settings = makeRes();
   await routeByPath("/skill-mcp-manager/settings").handler(makeReq("GET", "/skill-mcp-manager/settings"), settings);
-  if (bodyOf(settings).managedProfile !== "") failed.push("settings must expose managedProfile");
+  if (bodyOf(settings).viewProfile !== "__test__") failed.push("settings must expose viewProfile");
+  if (bodyOf(settings).bootedProfile !== "__test__") failed.push("settings must expose bootedProfile");
 
   const refused = makeRes();
   await routeByPath("/skill-mcp-manager/settings").handler(
-    makeReq("POST", "/skill-mcp-manager/settings", { managedProfile: "web" }),
+    makeReq("POST", "/skill-mcp-manager/settings", { viewProfile: "web" }),
     refused,
   );
-  if (refused.status !== 400) failed.push("settings POST must refuse to move the managed profile");
+  if (refused.status !== 400) failed.push("settings POST must refuse to move the view profile");
+
+  const unknown = makeRes();
+  await routeByPath("/skill-mcp-manager/profile").handler(
+    makeReq("POST", "/skill-mcp-manager/profile", { name: "nope" }),
+    unknown,
+  );
+  if (unknown.status !== 400) failed.push("an unknown profile must be refused");
 }
 
 // Inject path (real host): webServer is provided lazily, so the plugin must

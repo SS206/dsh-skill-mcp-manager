@@ -9,3 +9,6 @@ pnpm-lock.yaml
 test/patch.yml
 *.tgz
 .codegraph/
+
+# superseded files kept for reference (removed from the suite)
+.trash/

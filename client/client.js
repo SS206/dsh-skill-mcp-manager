@@ -353,17 +353,16 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
   }
 
   // ── MCP page ─────────────────────────────────────────────────────────────
-  const TIERS = ["eager", "on-demand", "disabled"];
-  const TIER_LABEL = { "eager": "常驻", "on-demand": "按需", "disabled": "关闭" };
-  const TIER_TONE = { "eager": "success", "on-demand": "info", "disabled": "muted" };
-  const SOURCE_LABEL = { managed: "托管", native: "用户补丁", bundle: "捆绑", builtin: "内置" };
+  const TIERS = ["native", "on-demand", "off"];
+  const TIER_LABEL = { "native": "常驻", "on-demand": "按需", "off": "关闭" };
+  const TIER_TONE = { "native": "success", "on-demand": "info", "off": "muted" };
+  const SOURCE_LABEL = { user: "补丁层", bundle: "捆绑", builtin: "内置" };
   const SOURCE_HINT = {
-    managed: "本插件接管或登记的行：可改档位、逐工具开关、删除",
-    native: "留在用户补丁层、本插件没有接管的行：只能停用/启用",
-    bundle: "由其它 bundle 提供的行：只能停用/启用与重启，配置属于该 bundle",
+    user: "写在这个 profile 的 cordis.patch.yml 里的行：可改档位、删除",
+    bundle: "由其它 bundle 的补丁提供的行：可改档位（经用户层覆盖），配置属于该 bundle",
     builtin: "宿主内置的工具集：只读",
   };
-  const SOURCE_ORDER = ["managed", "native", "bundle", "builtin"];
+  const SOURCE_ORDER = ["user", "bundle", "builtin"];
   const APPROVAL_OPTIONS = [
     ["follow", "跟随当前对话的 DSH 权限"],
     ["always-ask", "每次都问"],
@@ -372,7 +371,6 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
 
   function McpPage() {
     const [inventory, setInventory] = useState(null);
-    const [legacyHost, setLegacyHost] = useState(false);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
     const [notice, setNotice] = useState("");
@@ -382,50 +380,19 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
     const [output, setOutput] = useState("");
     const [busyKey, setBusyKey] = useState("");
     const [profile, setProfile] = useState(null);
-    const [profileChoice, setProfileChoice] = useState("");
-    const [profileBusy, setProfileBusy] = useState(false);
-    const [profileConfirm, setProfileConfirm] = useState("");
 
-    const refresh = useCallback(async (rv) => {
+    const refresh = useCallback(async (rv, profileName) => {
       setLoading(true);
       setError("");
       try {
-        const data = await getJson("/skill-mcp-manager/inventory" + (rv ? "?reveal=1" : ""));
-        setLegacyHost(false);
-        setInventory(data);
+        let url = "/skill-mcp-manager/inventory";
+        const params = [];
+        if (rv) params.push("reveal=1");
+        if (profileName) params.push("profile=" + encodeURIComponent(profileName));
+        if (params.length > 0) url += "?" + params.join("&");
+        setInventory(await getJson(url));
       } catch (err) {
-        // A host process that has not been restarted since this client shipped
-        // has no /inventory route yet. Degrade to the managed list instead of
-        // showing an empty page: every action on a managed row still works.
-        if (/HTTP 404/.test(errText(err))) {
-          try {
-            const data = await getJson("/skill-mcp-manager/mcp" + (rv ? "?reveal=1" : ""));
-            const entries = data.entries || [];
-            setLegacyHost(true);
-            setInventory({
-              servers: entries.map((entry) => Object.assign({}, entry, {
-                serverKey: entry.name,
-                source: "managed",
-                enabled: entry.tier !== "disabled",
-                editable: true,
-                removable: true,
-                restartable: false,
-                live: {
-                  mounted: entry.tier !== "disabled",
-                  phase: entry.tier,
-                  toolCount: entry.toolCount,
-                  tools: entry.tools || [],
-                },
-              })),
-              counts: { managed: entries.length, native: 0, bundle: 0, builtin: 0 },
-              bundleAvailable: false,
-            });
-          } catch (fallbackError) {
-            setError(errText(fallbackError));
-          }
-        } else {
-          setError(errText(err));
-        }
+        setError(errText(err));
       } finally {
         setLoading(false);
       }
@@ -435,9 +402,7 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
 
     const loadProfile = useCallback(async () => {
       try {
-        const data = await getJson("/skill-mcp-manager/profile");
-        setProfile(data);
-        if (typeof data.choice === "string") setProfileChoice(data.choice);
+        setProfile(await getJson("/skill-mcp-manager/profile"));
       } catch (err) {
         setError(errText(err));
       }
@@ -445,51 +410,39 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
 
     useEffect(() => { loadProfile(); }, [loadProfile]);
 
-    // Switching is a handover, not a preference: the released profile goes back
-    // to its native rows, the new one is taken over, and the second click on the
-    // button is the confirmation step.
-    async function applyProfile() {
-      const next = profileChoice;
-      const current = profile && profile.target ? profile.target.name : "";
-      if (next !== current && profileConfirm !== next) {
-        setProfileConfirm(next);
-        setNotice("");
-        setError("");
-        return;
-      }
-      setProfileConfirm("");
-      setProfileBusy(true);
+    const bootedName = profile && profile.booted ? profile.booted.name : "";
+    const viewName = inventory && inventory.profile ? inventory.profile.name : bootedName;
+    const viewingBooted = viewName === bootedName && bootedName !== "";
+
+    // Changing the view is a display preference only: no takeover, no
+    // handover, nothing to confirm.
+    async function applyProfile(name) {
+      setNotice("");
+      setError("");
       try {
-        const data = await postJson("/skill-mcp-manager/profile", { name: next });
-        setProfile(data);
-        if (typeof data.choice === "string") setProfileChoice(data.choice);
-        const targetName = data.target ? data.target.name : next;
-        setNotice(data.switched === true
-          ? "已接管 " + targetName + "（交还 " + data.previous + "，导入 " + data.imported + " 条）"
-            + (data.settingsPersisted === false ? "；注意：选择没有写进 settings.json，重启后会回到原目标" : "")
-          : "管理目标已是 " + targetName + "，仅记录了选择");
-        await refresh(reveal);
+        await postJson("/skill-mcp-manager/profile", { name: name === bootedName ? "" : name });
+        await loadProfile();
+        await refresh(reveal, name === bootedName ? "" : name);
+        setNotice(name === bootedName
+          ? "已跟随运行中的 profile（" + bootedName + "）"
+          : "正在显示 " + name + " 的清单" + (name === bootedName ? "" : "（只读，它未在运行）"));
       } catch (err) {
         setError(errText(err));
-      } finally {
-        setProfileBusy(false);
       }
     }
 
     async function toggleReveal() {
       const next = !reveal;
       setReveal(next);
-      await refresh(next);
+      await refresh(next, viewName === bootedName ? "" : viewName);
     }
 
     async function setTier(server, tier) {
+      if (!viewingBooted) return;
       setBusyKey(server.serverKey);
       try {
-        const upgrading = server.tier === "on-demand" && tier === "eager";
-        await postJson("/skill-mcp-manager/mcp/tier", { name: server.serverKey, tier: tier });
-        setNotice(upgrading
-          ? "已升至常驻（运行中注册，会话前缀失效一次）"
-          : "已切换「" + server.serverKey + "」到 " + (TIER_LABEL[tier] || tier));
+        await postJson("/skill-mcp-manager/mcp/tier", { rowId: server.rowId, tier: tier });
+        setNotice("已切换「" + server.serverKey + "」到 " + (TIER_LABEL[tier] || tier) + "（补丁热生效约 1 秒）");
         await refresh(reveal);
       } catch (err) {
         setError(errText(err));
@@ -501,7 +454,7 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
     async function setToolEnabled(server, tool, enabled) {
       try {
         await postJson("/skill-mcp-manager/mcp/tool-tier", {
-          name: server.serverKey,
+          rowId: server.rowId,
           tool: tool.name,
           enabled: enabled,
         });
@@ -515,39 +468,39 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
     async function run(server, peek) {
       setOutput("");
       try {
-        const data = await postJson("/skill-mcp-manager/mcp/load", { name: server.serverKey, peek: peek === true });
+        const data = await postJson("/skill-mcp-manager/mcp/load", { name: server.serverKey });
         setOutput(data.text || "");
-        setNotice(peek ? "已查看描述" : "已刷新快照");
+        setNotice("已查看描述");
         await refresh(reveal);
       } catch (err) {
         setError(errText(err));
+      }
+    }
+
+    async function snapshot(server) {
+      setOutput("");
+      setBusyKey(server.serverKey);
+      try {
+        const data = await postJson("/skill-mcp-manager/row/snapshot", { rowId: server.rowId });
+        setOutput(data.text || "");
+        setNotice("已刷新 " + server.serverKey + " 的快照");
+        await refresh(reveal);
+      } catch (err) {
+        setError(errText(err));
+      } finally {
+        setBusyKey("");
       }
     }
 
     async function remove(server) {
       setConfirming("");
       try {
-        await postJson("/skill-mcp-manager/mcp/delete", { name: server.serverKey });
+        await postJson("/skill-mcp-manager/mcp/delete", { rowId: server.rowId });
         setNotice("已删除 " + server.serverKey);
         setDetail("");
         await refresh(reveal);
       } catch (err) {
         setError(errText(err));
-      }
-    }
-
-    // A row this plugin does not own: the patch layer's disabled override is the
-    // only lever, and it takes effect when the tree re-composes (~1s).
-    async function toggleRow(server) {
-      setBusyKey(server.serverKey);
-      try {
-        await postJson("/skill-mcp-manager/row/toggle", { id: server.id, enabled: !server.enabled });
-        setNotice((server.enabled ? "已停用 " : "已启用 ") + server.serverKey + "（补丁热生效约 1 秒）");
-        await refresh(reveal);
-      } catch (err) {
-        setError(errText(err));
-      } finally {
-        setBusyKey("");
       }
     }
 
@@ -565,22 +518,21 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
     }
 
     function detailBlock(server) {
-      const isManaged = server.source === "managed";
+      const proxied = server.tier === "on-demand";
       return h("div", { className: "smx-detail" },
-        isManaged
-          ? h("div", { className: "smx-detail__section" },
-              h("div", { className: "smx-detail__label" }, "档位"),
-              h("select", {
-                className: "smx-select",
-                value: server.tier,
-                onChange: (event) => setTier(server, event.target.value),
-              }, TIERS.map((tier) => h("option", { key: tier, value: tier }, TIER_LABEL[tier] + " (" + tier + ")"))),
-            )
-          : null,
+        h("div", { className: "smx-detail__section" },
+          h("div", { className: "smx-detail__label" }, "档位"),
+          h("select", {
+            className: "smx-select",
+            value: server.tier,
+            disabled: !viewingBooted || busyKey === server.serverKey,
+            onChange: (event) => setTier(server, event.target.value),
+          }, TIERS.map((tier) => h("option", { key: tier, value: tier }, TIER_LABEL[tier] + " (" + tier + ")"))),
+        ),
         h("div", { className: "smx-kvlist" },
-          h(Kv, { label: "来源", value: SOURCE_LABEL[server.source] || server.source }),
-          h(Kv, { label: "行 id", value: server.id }),
-          h(Kv, { label: "运行状态", value: server.live ? (server.live.phase || "") + (server.live.mounted ? "" : " · 未挂载") : "" }),
+          h(Kv, { label: "来源", value: (SOURCE_LABEL[server.source] || server.source) + (server.bundle ? " · " + server.bundle : "") }),
+          h(Kv, { label: "行 id", value: server.rowId }),
+          h(Kv, { label: "运行状态", value: server.live ? String(server.live.phase ?? "—") + (server.live.mounted === null ? "" : server.live.mounted ? "" : " · 未挂载") : "" }),
           h(Kv, { label: "服务器自报名", value: server.serverName }),
           h(Kv, { label: "版本", value: server.serverVersion }),
           h(Kv, { label: "标题", value: server.serverTitle }),
@@ -589,59 +541,49 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
           h(Kv, { label: "使用说明", value: server.instructions }),
           h(Kv, { label: "备注", value: server.notes }),
           h(Kv, { label: "上次刷新快照", value: server.lastLoadAt }),
+          server.unevaluated ? h(Kv, { label: "表达式求值", value: server.unevaluated }) : null,
         ),
         configRows(server),
-        toolList(server, isManaged, (tool, enabled) => setToolEnabled(server, tool, enabled)),
-        isManaged
+        toolList(server, proxied && viewingBooted, (tool, enabled) => setToolEnabled(server, tool, enabled)),
+        viewingBooted && server.source !== "builtin"
           ? h("div", { className: "smx-detail__actions" },
               h("button", { type: "button", className: "smx-btn", onClick: () => run(server, true) }, "查看描述"),
-              h("button", { type: "button", className: "smx-btn", onClick: () => run(server, false) }, "刷新快照"),
+              h("button", { type: "button", className: "smx-btn", onClick: () => snapshot(server) }, "刷新快照"),
             )
           : null,
-        isManaged && output ? h("pre", { className: "smx-output" }, output) : null,
+        output ? h("pre", { className: "smx-output" }, output) : null,
       );
     }
 
     function serverRow(server) {
       const key = server.serverKey;
       const isOpen = detail === key;
-      const isManaged = server.source === "managed";
-      const tone = isManaged ? (TIER_TONE[server.tier] || "muted") : (server.enabled ? "info" : "muted");
-      const stateLabel = isManaged
-        ? (TIER_LABEL[server.tier] || server.tier)
-        : (server.enabled ? "启用" : "停用");
+      const tone = TIER_TONE[server.tier] || (server.enabled ? "info" : "muted");
       return h("li", { key: key + ":" + server.source, className: cx("smx-row smx-row--col", !server.enabled && "is-off") },
         h("div", { className: "smx-row__head" },
           h("div", { className: "smx-row__main" },
             h("div", { className: "smx-row__top" },
               h("span", { className: "smx-row__name" }, key),
-              h(Badge, { tone: tone }, stateLabel),
-              h(Badge, { tone: "muted" }, SOURCE_LABEL[server.source] || server.source),
+              h(Badge, { tone: tone }, TIER_LABEL[server.tier] || server.tier),
+              h(Badge, { tone: "muted" }, (SOURCE_LABEL[server.source] || server.source) + (server.bundle ? " · " + server.bundle : "")),
               server.transport ? h("span", { className: "smx-row__meta" }, server.transport) : null,
-              h("span", { className: "smx-row__meta" }, String(server.live ? server.live.toolCount : 0) + " 工具"),
+              server.live && server.live.toolCount !== null && server.live.toolCount !== undefined
+                ? h("span", { className: "smx-row__meta" }, String(server.live.toolCount) + " 工具")
+                : null,
               server.label ? h("span", { className: "smx-row__meta" }, server.label) : null,
-              server.connectFailed ? h(Badge, { tone: "muted" }, "连接失败") : null,
+              server.unevaluated ? h(Badge, { tone: "muted" }, "表达式未求值") : null,
             ),
             server.serverDescription ? h("div", { className: "smx-row__desc" }, server.serverDescription) : null,
           ),
           h("div", { className: "smx-row__actions" },
-            isManaged
-              ? h("select", {
-                  className: "smx-select",
-                  value: server.tier,
-                  disabled: busyKey === key,
-                  "aria-label": key + " 档位",
-                  onChange: (event) => setTier(server, event.target.value),
-                }, TIERS.map((tier) => h("option", { key: tier, value: tier }, TIER_LABEL[tier])))
-              : h("label", { className: "smx-switchline" },
-                  h(Switch, {
-                    checked: server.enabled,
-                    disabled: busyKey === key,
-                    onChange: () => toggleRow(server),
-                  }),
-                  h("span", { className: "smx-switchline__label" }, server.enabled ? "启用" : "停用"),
-                ),
-            !isManaged && server.restartable
+            h("select", {
+              className: "smx-select",
+              value: server.tier,
+              disabled: !viewingBooted || busyKey === key,
+              "aria-label": key + " 档位",
+              onChange: (event) => setTier(server, event.target.value),
+            }, TIERS.map((tier) => h("option", { key: tier, value: tier }, TIER_LABEL[tier]))),
+            server.restartable
               ? h("button", {
                   type: "button",
                   className: "smx-btn",
@@ -650,7 +592,7 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
                 }, "重启")
               : null,
             h("button", { type: "button", className: "smx-btn", onClick: () => setDetail(isOpen ? "" : key) }, isOpen ? "收起" : "详情"),
-            isManaged
+            server.removable && viewingBooted
               ? (confirming === key
                   ? h("span", { className: "smx-confirm" },
                       h("button", { type: "button", className: "smx-btn smx-btn--danger", onClick: () => remove(server) }, "确认删除条目"),
@@ -664,106 +606,79 @@ window.__ModuleLoader__.load({ id: "dsh-skill-mcp-manager", factory: (require) =
       );
     }
 
-    // Managed-profile row: which profile's MCP library this plugin owns, where
-    // its patch lives, and the warnings that make a target dangerous.
+    // View-profile row: which profile's inventory the page displays. Display
+    // only — the booted profile is the only one whose rows are writable.
     function profileBlock() {
       if (profile === null) return null;
-      const target = profile.target || {};
+      const booted = profile.booted || {};
       const list = profile.profiles || [];
-      const targetEntry = list.find((item) => item.name === target.name);
-      const sourceLabel = {
-        settings: "设置页固定",
-        config: "安装配置指定",
-        context: "跟随运行中的 profile",
-        argv: "命令行 --profile",
-        positional: "命令行 profile 参数",
-        default: "兜底默认 web",
-      }[target.source] || String(target.source || "");
-      const options = [
-        h("option", { key: "__default", value: "" }, "默认（安装配置优先，否则跟随运行中的 profile）"),
-        h("option", { key: "__auto", value: "auto" }, "自动（忽略安装配置，跟随运行中的 profile）"),
-      ].concat(list.map((item) => h("option", { key: item.name, value: item.name },
-        item.name
-          + (item.booted ? "（当前运行）" : "")
-          + (item.pluginInstalled === false ? "（未安装本插件）" : ""))));
-      const warnings = [];
-      if (typeof target.bootedName === "string" && target.isBooted === false) {
-        warnings.push("当前运行的是 " + target.bootedName + "，管理目标却是 " + target.name
-          + "：两边互不影响，被交还的 profile 要等它下次启动才会恢复原生 MCP。");
-      }
-      if (targetEntry && targetEntry.pluginInstalled === false) {
-        warnings.push("目标 profile 没有装本插件：接管它的原生 MCP 之后，该 profile 启动时会没有这些服务器。");
-      }
-      if (typeof profile.legacyOwner === "string" && profile.legacyOwner !== "" && profile.legacyOwner !== target.name) {
-        warnings.push("旧版单文件 registry.json 已归入 " + profile.legacyOwner + "，切到它即可看到那批条目。");
-      }
-      const needsConfirm = profileConfirm !== "" && profileConfirm === profileChoice && profileChoice !== target.name;
+      const view = viewName || booted.name || "";
+      const options = list.map((item) => h("option", { key: item.name, value: item.name },
+        item.name + (item.booted ? "（当前运行）" : "")));
       return h("div", { className: "smx-setting smx-setting--block" },
         h("div", { className: "smx-setting__row" },
-          h("label", { className: "smx-setting__label" }, "管理 profile"),
+          h("label", { className: "smx-setting__label" }, "查看 profile"),
           h("select", {
             className: "smx-select",
-            value: profileChoice,
-            disabled: profileBusy,
-            "aria-label": "管理 profile",
-            onChange: (event) => { setProfileChoice(event.target.value); setProfileConfirm(""); },
+            value: view,
+            "aria-label": "查看 profile",
+            onChange: (event) => applyProfile(event.target.value),
           }, options),
-          h("button", {
-            type: "button",
-            className: "smx-btn",
-            disabled: profileBusy,
-            onClick: applyProfile,
-          }, profileBusy ? "切换中…" : (needsConfirm ? "确认切换" : "应用")),
-          h("span", { className: "smx-count" }, "目标 " + target.name + "（" + sourceLabel + "）"),
+          h("span", { className: "smx-count" },
+            "运行中 " + (booted.name || "—")
+            + (viewingBooted ? " · 可修改" : " · 只读视图")),
         ),
         h("div", { className: "smx-setting__hint" },
-          "patch: " + (target.patchPath || "") + "\n" + (target.registryFile || "")),
-        needsConfirm
-          ? h(Notice, { kind: "success" }, "再点一次「确认切换」：把 " + target.name + " 交还原生 MCP，并接管 " + profileChoice + "。")
+          "booted patch: " + (booted.patchPath || "") + "（切换只改变显示，不改变任何 profile 的配置）"),
+        !viewingBooted
+          ? h(Notice, { kind: "warning" },
+              "正在查看 " + view + " 的静态清单：它没有在运行，行信息来自补丁文件（无实时工具数）。切回 "
+              + booted.name + " 才能修改档位。")
           : null,
-        warnings.map((text, index) => h(Notice, { key: "profile-warn-" + index, kind: "error" }, text)),
       );
     }
 
-    const servers = inventory && Array.isArray(inventory.servers) ? inventory.servers : [];
+    const servers = inventory && Array.isArray(inventory.rows) ? inventory.rows : [];
+    const builtins = inventory && Array.isArray(inventory.builtin) ? inventory.builtin : [];
+    const allRows = servers.concat(builtins);
     const counts = (inventory && inventory.counts) || {};
-    const groups = SOURCE_ORDER
-      .map((source) => ({ source: source, rows: servers.filter((server) => server.source === source) }))
-      .filter((group) => group.rows.length > 0);
 
     return h("div", { className: "smx" },
       h(PageHeader, {
         title: "MCP 管理",
-        subtitle: "全部 MCP 服务器：本插件托管的、用户补丁层的、其它 bundle 提供的与宿主内置的",
+        subtitle: "这个 profile 组合出的全部 MCP：补丁层的行、各 bundle 提供的行与宿主内置工具集",
         actions: [
           h("button", { key: "reveal", type: "button", className: "smx-btn", onClick: toggleReveal }, reveal ? "隐藏密钥" : "显示密钥"),
-          h("button", { key: "refresh", type: "button", className: "smx-btn", onClick: () => refresh(reveal) }, "刷新"),
+          h("button", { key: "refresh", type: "button", className: "smx-btn", onClick: () => refresh(reveal, viewName === bootedName ? "" : viewName) }, "刷新"),
         ],
       }),
       profileBlock(),
       notice ? h(Notice, { kind: "success", onDismiss: () => setNotice("") }, notice) : null,
       error ? h(Notice, { kind: "error", onDismiss: () => setError("") }, error) : null,
-      legacyHost
-        ? h(Notice, { kind: "warning" }, "宿主进程还在运行改动前的插件代码：目前只显示托管条目。请完全退出 DSH 后重新启动，即可看到用户补丁 / 捆绑 / 内置来源。")
-        : null,
-      !legacyHost && inventory && inventory.bundleAvailable === false
-        ? h(Notice, { kind: "warning" }, "本次进程启动的不是管理目标 profile：捆绑段只在管理当前运行的 profile 时可见。")
+      inventory && inventory.duplicates && inventory.duplicates.length > 0
+        ? h(Notice, { kind: "warning" },
+            "有 " + inventory.duplicates.length + " 个行的 serverName 与其它行重复（已隐藏）："
+            + inventory.duplicates.map((d) => d.serverName + "(" + d.rowId + ")").join("、"))
         : null,
       h("div", { className: "smx-count" }, inventory
-        ? String(servers.length) + " 个服务器 · 托管 " + (counts.managed || 0)
-          + " · 用户补丁 " + (counts.native || 0)
+        ? String(allRows.length) + " 行 · 补丁层 " + (counts.user || 0)
           + " · 捆绑 " + (counts.bundle || 0)
           + " · 内置 " + (counts.builtin || 0)
+          + " · 启用 " + (counts.on || 0)
         : ""),
       loading
         ? h(Empty, null, "加载中…")
-        : groups.length === 0 ? h(Empty, null, "没有 MCP 服务器")
-        : groups.map((group) => h(Group, {
-            key: group.source,
-            title: SOURCE_LABEL[group.source] || group.source,
-            count: group.rows.length,
-            hint: SOURCE_HINT[group.source] || "",
-          }, h("ul", { className: "smx-list" }, group.rows.map(serverRow)))),
+        : allRows.length === 0 ? h(Empty, null, "没有 MCP 服务器")
+        : SOURCE_ORDER.map((source) => {
+            const rows = allRows.filter((server) => server.source === source);
+            if (rows.length === 0) return null;
+            return h(Group, {
+              key: source,
+              title: SOURCE_LABEL[source] || source,
+              count: rows.length,
+              hint: SOURCE_HINT[source] || "",
+            }, h("ul", { className: "smx-list" }, rows.map(serverRow)));
+          }),
     );
   }
 

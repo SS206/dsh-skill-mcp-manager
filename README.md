@@ -44,11 +44,15 @@ Updated your own local MCP server? Just `mcp_load` it in the session — reconne
 
 To make the plugin easy and reassuring to use, it also includes:
 
-### 6. Native MCP config takeover — nothing lost on uninstall
+### 6. Management, not ownership
 
-On install it automatically takes over your existing MCP config: every `@deepseek-ai/dsh-mcp-client` row in the profile is imported into the registry and taken over (on-demand by default; already-disabled stays disabled).
+The plugin neither stores nor rewrites an MCP definition. Every `@deepseek-ai/dsh-mcp-client` row belongs to the layer that declares it — the profile's `cordis.patch.yml`, or a bundle's own patch file — and the native DSH client loads it as usual. What the plugin does is **discover, display and retier per row**:
 
-Uninstall is safe: whenever an MCP is added, the plugin also syncs the MCP config into the original config file but keeps it **disabled**. `/mcp prepare-uninstall` flips those disabled MCPs back to enabled and hands every managed entry (with full config) back to the native client. **Removing the plugin never loses your MCP config.**
+- **常驻 / eager** (default): writes nothing; the native `dsh-mcp-client` loads it;
+- **按需 / on-demand**: writes a `disabled` override that holds the native client off and lets this plugin's bridge start the server per session (less context, a controlled tool face);
+- **关闭 / disabled**: writes the override only; nobody loads it.
+
+All three are reversible patch-layer facts — delete the override by hand and the row is back to eager. Removing or disabling the plugin never affects a single MCP definition. The old takeover (and the "managed span" it wrote) is gone in 2.0; on first start the plugin dismantles any v1 span, writes those rows back verbatim, and archives the old registry.
 
 ### 7. Your note on every MCP
 
@@ -64,11 +68,11 @@ After install the plugin connects once to fetch real tool names and descriptions
 
 ### 10. Profile-scoped by default, switchable on demand
 
-By default it manages the **profile this host booted** (read from the host's `profileContext`, never guessed from the command line) — no overreach, no misplacement. When you need it, the settings page can switch the target to web / desktop / another profile: the released profile is handed back to its native MCP config and every profile keeps its own registry.
+The **running** profile is the one this host booted (read from the host's `profileContext`, never guessed from the command line) — no overreach, no misplacement; it is the only profile whose rows are writable. The settings page's "查看 profile" picker only chooses which profile's inventory is DISPLAYED: switching it takes nothing over and hands nothing back. A profile that is not running is a read-only static view (rows read from its patch and bundle layers).
 
 ### 11. Every MCP source in one list, and settings where they belong
 
-**Settings → Capability** is one page with an animated **Skills / MCP** tab strip. The MCP tab holds exactly two things: the managed-profile row (which profile's MCP library the plugin owns, switchable with a two-step confirmation) and one list of every server the deployment can reach — **Managed** (this plugin's registry: three tiers, per-tool switches, delete), **User patch** (rows left in the profile's patch layer), **Bundle** (servers another bundle contributes to the composed loader tree, e.g. exa and calagopus: enable/disable through a patch-layer `disabled` override, restart in place, read-only config) and **Built-in** (computer-use / browser-use). Live tool lists come from the model-facing schemas, so what the page shows is what the model can actually call. Skill descriptions collapse by default, which keeps the list readable.
+**Settings → Capability** is one page with an animated **Skills / MCP** tab strip. The MCP tab holds exactly two things: the **view-profile** picker (which profile's inventory is DISPLAYED — a display preference, nothing to confirm) and one list of every row the profile composes — **patch layer** (rows in `<profile>/cordis.patch.yml`: tier, restart, delete) and **bundle** (rows another bundle contributes statically, e.g. exa and calagopus: tier, restart; their config belongs to the bundle), plus the harness's **built-in** tool providers (computer-use / browser-use, read-only). Rows that only the live loader knows about (a `--patch` overlay, a host-owned bundle) are listed as bundle rows too. Live tool lists come from the model-facing schemas, so what the page shows is what the model can actually call. A foreign profile is read-only and static. Skill descriptions collapse by default, which keeps the list readable.
 
 Plugin-wide settings (tool description truncation, stdio buffer, local-command approval, LAN allowlist) moved to the plugin's own page in the DSH plugin manager — **Plugins → dsh-skill-mcp-manager** — through the official keyed seat `plugins.bundle.config`, with a settings-row fallback for a shell that never declares that seat.
 
@@ -112,8 +116,8 @@ Restart the profile. The plugin lives in the Host composition, so the `mcp_regis
 Open **Settings → Capability**:
 
 - **SKILL tab** — every managed skill (bundle `SKILL.md`), sorted by path: model-visibility switch, open in system editor, cross-platform delete. Skills shipped with the deployment (under `node_modules` / `app.asar`) are read-only: view + open only.
-- **MCP tab → 管理 profile row** — which profile's library this plugin owns (with its source: booted profile / install config / settings), the patch path, and the candidate profiles. Switching hands the released profile back to its pre-takeover patch, adopts the new one, and drops every session instance so the next step rebuilds from the new library. A target that is not the booted profile (or that has no plugin installed) is flagged before it is switched.
-- **MCP tab** — every registered server with tier badges and tool counts: switch tier, inspect details (command / env / headers / tools), enable or disable individual tools (blacklist; newly discovered tools default to enabled), mask or reveal secrets, peek descriptions, refresh the shared tool snapshot, delete entries. Snapshot refresh trial-connects and updates the registry, then closes; it does not leave a live instance. Disabled tools are hidden from the AI and rejected again at the execution boundary. A setting row adjusts the catalog's **tool-description truncation** (default 150 chars).
+- **MCP tab → 查看 profile row** — which profile's inventory is displayed (booted by default), with the booted profile's patch path and a read-only notice when the view is not the running profile. Choosing a view writes a display preference only.
+- **MCP tab** — every row with tier badges and tool counts: switch tier (常驻 / 按需 / 关闭), restart a loader-mounted row in place, inspect details (command / env / headers / server-declared metadata / tools), enable or disable individual tools **on an on-demand row** (a native row's tool face belongs to the dsh-mcp-client), mask or reveal secrets, peek the description, refresh the cached snapshot. Snapshot refresh trial-connects, caches the metadata + tool list, then closes; it does not leave a live instance and never happens at startup. A setting row adjusts the catalog's **tool-description truncation** (default 150 chars).
 
 ### Model-facing tools
 
@@ -125,7 +129,7 @@ The plugin provides three small, fixed tools to manage all on-demand MCPs.
   mcp_register { name, tier?, transport, command?, args?, env?, cwd?, url?, headers?, notes? }
   ```
 
-  `tier` ∈ `eager` | `on-demand` | `disabled` (default `on-demand`). `notes` is user-maintained and is not overwritten by developer MCP updates.
+  `tier` ∈ `eager` | `on-demand` | `disabled` (default `on-demand`). Note that `eager` now means "written into the patch layer and loaded by the native `dsh-mcp-client`" — this plugin no longer registers native tools itself. A call that only names `notes`/`tier` is a partial update: no reconnect, no program restart. `notes` is user-maintained and is not overwritten by developer MCP updates.
 - **`mcp_load { name, peek? }`** — load / hot-reload a server instance **for the current session**, returning full tool definitions + server-declared metadata; other sessions are unaffected. `peek: true` only reads the snapshot — no connect, no disconnect — handy when the AI forgot a tool's parameters and wants a quick peek without interrupting the MCP's live process. Especially friendly for stateful MCPs like browser automation.
 - **`mcp_call { name, tool, args? }`** — invoke an on-demand tool (must `mcp_load` first) through **the current session's** loaded instance. Structured `args` only — never shell text, never a temp file. Malformed shapes (missing/non-string `tool`, non-object `args`) are rejected with the correct shape spelled out, never auto-unwrapped; failed calls (protocol errors and server `isError` results) echo back `called MCP tool: <server>/<tool>` plus the exact `arguments` sent so the model can self-correct.
 
@@ -143,8 +147,10 @@ The plugin provides three small, fixed tools to manage all on-demand MCPs.
 
 ## Data
 
-- `~/.dsh/skill-mcp-manager/registry.<profile>.json` — authoritative MCP registry (version 1, `entries[]`). One file per managed profile: switching targets never merges one profile's servers into another's. A pre-1.3 `registry.json` is migrated once to the profile that the old argv-only detection resolved to, and kept as `registry.json.bak-<ts>`.
-- `~/.dsh/skill-mcp-manager/settings.json` — plugin settings (`customRecursiveDirs`, `toolDescriptionMaxLength`, `managedProfile`, …).
+- **MCP definitions are not in the plugin's data dir** — they are your profile's patch files (`<profile>/cordis.patch.yml` plus each bundle's patch).
+- `~/.dsh/skill-mcp-manager/agents.<profile>.json` — plugin-private state: the rows this plugin proxies (on-demand), their per-tool switches, the cached server snapshots and notes. Absent when no row is proxied.
+- `~/.dsh/skill-mcp-manager/settings.json` — plugin settings (`customRecursiveDirs`, `toolDescriptionMaxLength`, `stdioMaxBufferSizeMb`, `viewProfile`, …).
+- A v1 `registry.<profile>.json` is migrated once and kept as `registry.<profile>.json.migrated-<ts>.bak` (never deleted).
 - `~/.dsh/skill-mcp-manager/trash.log` — delete audit.
 - Env values may be literals or `$VAR` references to the process environment.
 

@@ -1,98 +1,18 @@
-// Unified-inventory smoke test: mount the plugin against a mock ctx that
-// supplies a loader, tool schemas and a built-in provider, with a prepopulated
-// registry and patch file. Verifies (1) the four MCP sources appear once each
-// with the right labels, (2) the patch layer's `disabled` override round-trips
-// for rows this plugin does not own, and (3) an in-place restart goes through
-// the live loader entry.
+// Unified-inventory smoke test (v2): every MCP row the booted profile reaches
+// is listed once, with the right source label — the user patch layer, a bundle
+// layer (static) or a loader-only row (live), plus the harness's built-in tool
+// providers. Verifies the tier levers (patch-layer `disabled` overrides),
+// in-place restart, and the pure override helpers.
 
-import { mkdir, writeFile, readFile, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { bootPlugin } from "./helpers/boot.mjs";
+import { setDisabledOverride, listDisabledOverrides } from "../lib/rows.js";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const tmp = join(here, "..", ".test-data", "inventory-smoke-" + process.pid);
-await rm(tmp, { recursive: true, force: true });
-await mkdir(join(tmp, "profiles", "__test__"), { recursive: true });
-// The host home must be redirected BEFORE the plugin module loads: it resolves
-// DSH_HOME once, at import time.
-process.env.DSH_HOME = tmp;
-const { apply, setDisabledOverride, listDisabledOverrides } = await import("../lib/index.js");
-
-const failed = [];
-function check(condition, message) {
-  if (!condition) failed.push(message);
-}
-
-const patchPath = join(tmp, "profiles", "__test__", "cordis.patch.yml");
-const dataDir = join(tmp, "data");
-await mkdir(dataDir, { recursive: true });
-
-// One user row the manager must NOT adopt (importNativeMcp is off below), so it
-// stays a "native" row in the inventory.
-await writeFile(
-  patchPath,
-  [
-    "# user patch",
-    "- insert:",
-    '    - id: mcp-native-one',
-    '      name: "@deepseek-ai/dsh-mcp-client"',
-    "      config:",
-    "        serverName: native-one",
-    "        transport: stdio",
-    "        command: node",
-    "        args:",
-    "          - native.mjs",
-    "",
-  ].join("\n"),
-  "utf8",
-);
-
-// A registry with one registry-born managed entry. `tools` + `metaFetchedAt`
-// are filled so the boot warm-up does not try to connect anywhere.
-await writeFile(
-  join(dataDir, "registry.__test__.json"),
-  JSON.stringify({
-    version: 1,
-    entries: [
-      {
-        id: "mine",
-        name: "mine",
-        tier: "on-demand",
-        transport: "stdio",
-        command: "node",
-        args: ["mine.mjs"],
-        env: {},
-        cwd: null,
-        url: null,
-        headers: {},
-        notes: "",
-        systemEntryId: "mcp-mine",
-        managed: true,
-        registeredAt: "2026-10-18T00:00:00.000Z",
-        lastLoadAt: null,
-        lastSyncAt: "2026-10-18T00:00:00.000Z",
-        tools: [{ name: "ping", description: "ping" }],
-        disabledTools: [],
-        serverName: "",
-        serverVersion: "",
-        serverTitle: "",
-        serverDescription: "",
-        websiteUrl: "",
-        instructions: "",
-        capabilities: null,
-        metaFetchedAt: "2026-10-18T00:00:00.000Z",
-      },
-    ],
-  }),
-  "utf8",
-);
+const tmp = join(process.cwd(), ".test-data", "inventory-smoke-" + process.pid);
 
 const restarted = [];
 const fiber = (state) => ({ state, restart: async () => { restarted.push(state); } });
 const loaderEntries = [
-  // The managed entry's own disabled shadow row.
-  { options: { id: "mcp-mine", name: "@deepseek-ai/dsh-mcp-client", config: { serverName: "mine" } }, disabled: true },
-  // A bundle-provided row: alive, with a real fiber.
   {
     options: {
       id: "mcp-exa",
@@ -102,13 +22,11 @@ const loaderEntries = [
     disabled: false,
     fiber: fiber(2),
   },
-  // A bundle row whose fiber is disposed: restart must refuse it.
   {
     options: { id: "mcp-dead", name: "@deepseek-ai/dsh-mcp-client", config: { serverName: "dead", transport: "stdio", command: "node" } },
     disabled: false,
     fiber: fiber(4),
   },
-  // Not the MCP bridge: must never be listed.
   { options: { id: "other-plugin", name: "some-other-plugin", config: { anything: true } }, disabled: false },
 ];
 const schemas = [
@@ -118,143 +36,96 @@ const schemas = [
   { name: "some_other_tool", description: "Not a provider tool" },
 ];
 
-const routes = [];
-const commands = [];
-const ctx = {
-  tools: { register() { return () => {}; } },
-  skills: { registerProvider() { return () => {}; } },
-  on() { return () => {}; },
-  effect(fn) { const disposer = fn(); return () => { if (typeof disposer === "function") disposer(); }; },
-  get(name) {
-    if (name === "webServer") return { register(route) { routes.push(route); return () => {}; } };
-    if (name === "commands") return { register(definition) { commands.push(definition); return () => {}; } };
-    if (name === "profileContext") return { name: "__test__", patchPath };
-    if (name === "loader") return { entries: () => loaderEntries };
-    if (name === "tools") return { schemas: () => schemas };
-    if (name === "computerUse") return { click() {} };
-    return undefined;
-  },
-  logger: { warn() {}, error() {}, info() {} },
-};
-
-await apply(ctx, { dataDir, profile: "__test__", importNativeMcp: false });
-await new Promise((resolve) => setTimeout(resolve, 50));
-
-function makeReq(method, url, body) {
-  const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body), "utf8")];
-  let i = 0;
-  return {
-    method,
-    url,
-    headers: { origin: "http://127.0.0.1:7404", host: "127.0.0.1:7404" },
-    [Symbol.asyncIterator]() {
-      return { async next() { return i < chunks.length ? { value: chunks[i++], done: false } : { done: true }; } };
+const fixture = await bootPlugin({
+  tmp,
+  rows: [
+    { id: "mcp-native-one", serverName: "native-one", config: { transport: "stdio", command: "node", args: ["native.mjs"] } },
+    {
+      id: "mcp-mine",
+      serverName: "mine",
+      config: { transport: "stdio", command: "node", args: ["mine.mjs"] },
+      proxied: true,
+      snapshot: { tools: [{ name: "ping", description: "ping" }], fetchedAt: "2026-10-18T00:00:00.000Z" },
     },
-  };
-}
-function makeRes() {
-  const res = { status: 0, body: "" };
-  res.writeHead = (status) => { res.status = status; };
-  res.end = (chunk) => { res.body = chunk ?? ""; };
-  return res;
-}
-const bodyOf = (res) => (res.body ? JSON.parse(res.body) : {});
-const routeByPath = (path) => routes.find((route) => route.path === path);
+  ],
+  services: {
+    loader: { entries: () => loaderEntries },
+    tools: { schemas: () => schemas },
+    computerUse: { click() {} },
+  },
+});
 
-const inventoryRoute = routeByPath("/skill-mcp-manager/inventory");
-const toggleRoute = routeByPath("/skill-mcp-manager/row/toggle");
-const restartRoute = routeByPath("/skill-mcp-manager/row/restart");
-const tierRoute = routeByPath("/skill-mcp-manager/mcp/tier");
-check(inventoryRoute !== undefined, "inventory route was not registered");
-check(toggleRoute !== undefined, "row/toggle route was not registered");
-check(restartRoute !== undefined, "row/restart route was not registered");
+const failed = [];
+const check = (condition, message) => { if (!condition) failed.push(message); };
 
-async function callInventory() {
-  const res = makeRes();
-  await inventoryRoute.handler(makeReq("GET", "/skill-mcp-manager/inventory"), res);
-  return { status: res.status, body: bodyOf(res) };
+async function callInventory(url = "/skill-mcp-manager/inventory") {
+  return await fixture.callRoute("/skill-mcp-manager/inventory", "GET", undefined, { url });
 }
-const named = (inv) => new Map((inv.body.servers ?? []).map((server) => [server.serverKey ?? server.serverName, server]));
+const named = (json) => new Map((json?.rows ?? []).map((row) => [row.serverKey ?? row.serverName, row]));
 
-// ── the four sources ───────────────────────────────────────────────────────
-let inv = await callInventory();
-check(inv.status === 200, `inventory GET status ${inv.status}`);
+let inv = (await callInventory()).json;
 {
   const map = named(inv);
-  console.log("servers:", [...map.keys()].join(", "), "| counts:", JSON.stringify(inv.body.counts));
-  check(map.get("mine")?.source === "managed", "the registry entry should be managed");
-  check(map.get("native-one")?.source === "native", "an unadopted user row should be native");
-  check(map.get("exa")?.source === "bundle", "a loader row should be a bundle row");
-  check(map.get("computer-use")?.source === "builtin", "the built-in provider should be listed");
+  console.log("rows:", [...map.keys()].join(", "), "| counts:", JSON.stringify(inv?.counts));
+  check(map.get("mine")?.source === "user", "a user-layer row should be source=user");
+  check(map.get("native-one")?.source === "user", "an unproxied user row should be user");
+  check(map.get("native-one")?.tier === "native", "an unproxied user row should be native");
+  check(map.get("exa")?.source === "bundle", "a loader-only row should be a bundle row");
   check(!map.has("some-other-plugin"), "a non-bridge loader entry must not be listed");
-  const counts = inv.body.counts ?? {};
-  check(
-    counts.managed === 1 && counts.native === 1 && counts.bundle === 2 && counts.builtin === 1,
-    `counts wrong: ${JSON.stringify(counts)}`,
-  );
+  const builtin = new Map((inv?.builtin ?? []).map((row) => [row.serverKey, row]));
+  check(builtin.get("computer-use")?.live?.toolCount === 1, "builtin tools should be derived by naming convention");
+  check(inv?.counts?.user === 2 && inv?.counts?.bundle === 2 && inv?.counts?.builtin === 1, `counts wrong: ${JSON.stringify(inv?.counts)}`);
   check(map.get("exa")?.transport === "streamable-http", "bundle transport should be reported");
   check(map.get("exa")?.live?.toolCount === 2, "bundle tools should come from the live schemas");
-  check(map.get("computer-use")?.live?.toolCount === 1, "builtin tools should be derived by naming convention");
-  check(map.get("mine")?.live?.phase === "on-demand", "the managed phase should be its tier");
-  check(map.get("native-one")?.config === undefined || map.get("native-one")?.enabled === true, "the native row should read as enabled");
+  check(map.get("mine")?.tier === "on-demand", "a proxied row should be on-demand");
+  check(map.get("mine")?.live?.phase === "proxied", "a proxied row's phase should say so");
+  check(map.get("mine")?.live?.toolCount === 1, "a proxied row's tools should come from its snapshot");
 }
 
-// ── patch-layer overrides for rows this plugin does not own ────────────────
+// ── the tier levers ───────────────────────────────────────────────────────
 {
-  // Disabling a bundle row writes an explicit override.
-  const res = makeRes();
-  await toggleRoute.handler(makeReq("POST", "/skill-mcp-manager/row/toggle", { id: "mcp-exa", enabled: false }), res);
-  check(res.status === 200, `disabling a bundle row failed: ${res.body}`);
-  let text = await readFile(patchPath, "utf8");
-  check(listDisabledOverrides(text).get("mcp-exa") === true, "the override was not written");
-  inv = await callInventory();
-  check(named(inv).get("exa")?.enabled === false, "the bundle row should read as disabled");
+  const off = await fixture.callRoute("/skill-mcp-manager/mcp/tier", "POST", { rowId: "mcp-mine", tier: "off" });
+  check(off.status === 200, `turning a proxied row off failed: ${off.json?.error ?? off.status}`);
+  const agents = await fixture.readAgents();
+  check(agents?.rows?.["mcp-mine"] === undefined, "the proxied record should be gone after switching to off");
+  check(listDisabledOverrides(await fixture.readPatch()).get("mcp-mine") === true, "the holding override must stay");
 
-  // Re-enabling cannot come from absence (the bundle holds the row), so the
-  // override stays with `disabled: false` — and repeated toggles must not stack.
-  await toggleRoute.handler(makeReq("POST", "/skill-mcp-manager/row/toggle", { id: "mcp-exa", enabled: true }), makeRes());
-  text = await readFile(patchPath, "utf8");
-  check(listDisabledOverrides(text).get("mcp-exa") === false, "a bundle row must be re-enabled with disabled: false");
-  check((text.match(/- id: "mcp-exa"/g) ?? []).length === 1, "repeated toggles must not stack override items");
+  const native = await fixture.callRoute("/skill-mcp-manager/mcp/tier", "POST", { rowId: "mcp-mine", tier: "native" });
+  check(native.status === 200, `switching back to native failed: ${native.json?.error ?? native.status}`);
+  check(!listDisabledOverrides(await fixture.readPatch()).has("mcp-mine"), "the override should be dropped for a native user row");
 
-  // A user-layer row the plugin did not adopt: enabling DROPS the override.
-  await toggleRoute.handler(makeReq("POST", "/skill-mcp-manager/row/toggle", { id: "mcp-native-one", enabled: false }), makeRes());
-  text = await readFile(patchPath, "utf8");
-  check(listDisabledOverrides(text).get("mcp-native-one") === true, "the native row's override was not written");
-  await toggleRoute.handler(makeReq("POST", "/skill-mcp-manager/row/toggle", { id: "mcp-native-one", enabled: true }), makeRes());
-  text = await readFile(patchPath, "utf8");
-  check(!listDisabledOverrides(text).has("mcp-native-one"), "enabling a user-layer row must drop the override");
-  check(text.includes("serverName: native-one"), "the native row itself must survive");
+  await fixture.callRoute("/skill-mcp-manager/row/toggle", "POST", { rowId: "mcp-native-one" });
+  check(listDisabledOverrides(await fixture.readPatch()).get("mcp-native-one") === true, "the user row's override was not written");
+  await fixture.callRoute("/skill-mcp-manager/row/toggle", "POST", { rowId: "mcp-native-one" });
+  check(!listDisabledOverrides(await fixture.readPatch()).has("mcp-native-one"), "enabling a user-layer row must drop the override");
+  check((await fixture.readPatch()).includes("serverName: native-one"), "the native row itself must survive");
 
-  // An id that would inject YAML lines is refused.
-  const bad = makeRes();
-  await toggleRoute.handler(makeReq("POST", "/skill-mcp-manager/row/toggle", { id: 'x"\n  evil: true', enabled: false }), bad);
+  await fixture.callRoute("/skill-mcp-manager/row/toggle", "POST", { rowId: "mcp-exa" });
+  check(listDisabledOverrides(await fixture.readPatch()).get("mcp-exa") === true, "the bundle row's override was not written");
+  await fixture.callRoute("/skill-mcp-manager/row/toggle", "POST", { rowId: "mcp-exa" });
+  const patch = await fixture.readPatch();
+  check(listDisabledOverrides(patch).get("mcp-exa") === false, "a bundle row must be re-enabled with disabled: false");
+  check((patch.match(/- id: "mcp-exa"/g) ?? []).length === 1, "repeated toggles must not stack override items");
+
+  const bad = await fixture.callRoute("/skill-mcp-manager/row/toggle", "POST", { rowId: 'x"\n  evil: true' });
   check(bad.status === 400, "a YAML-injecting row id was accepted");
 
-  // Overrides survive a reconcile triggered by another action.
-  await toggleRoute.handler(makeReq("POST", "/skill-mcp-manager/row/toggle", { id: "mcp-exa", enabled: false }), makeRes());
-  await tierRoute.handler(makeReq("POST", "/skill-mcp-manager/mcp/tier", { name: "mine", tier: "disabled" }), makeRes());
-  text = await readFile(patchPath, "utf8");
-  check(listDisabledOverrides(text).get("mcp-exa") === true, "reconcile dropped the appended override");
-  check(text.includes("End managed MCP servers"), "the managed block disappeared after reconcile");
+  inv = (await callInventory()).json;
+  check(named(inv).get("exa")?.enabled === true, "the bundle row should read as enabled again");
 }
 
 // ── in-place restart ──────────────────────────────────────────────────────
 {
-  const ok = makeRes();
-  await restartRoute.handler(makeReq("POST", "/skill-mcp-manager/row/restart", { name: "exa" }), ok);
-  check(ok.status === 200 && restarted.length === 1, `restart failed: ${ok.body}`);
+  const ok = await fixture.callRoute("/skill-mcp-manager/row/restart", "POST", { name: "exa" });
+  check(ok.status === 200 && restarted.length === 1, `restart failed: ${ok.json?.error ?? ok.status}`);
 
-  const disposed = makeRes();
-  await restartRoute.handler(makeReq("POST", "/skill-mcp-manager/row/restart", { name: "dead" }), disposed);
-  check(disposed.status === 400 && /cannot be restarted/.test(bodyOf(disposed).error ?? ""), `disposed fiber: ${disposed.body}`);
+  const disposed = await fixture.callRoute("/skill-mcp-manager/row/restart", "POST", { name: "dead" });
+  check(disposed.status === 400 && /cannot be restarted/.test(disposed.json?.error ?? ""), `disposed fiber: ${JSON.stringify(disposed.json)}`);
 
-  const disabled = makeRes();
-  await restartRoute.handler(makeReq("POST", "/skill-mcp-manager/row/restart", { name: "mine" }), disabled);
-  check(disabled.status === 400 && /enable it first/.test(bodyOf(disabled).error ?? ""), `disabled restart: ${disabled.body}`);
+  const proxied = await fixture.callRoute("/skill-mcp-manager/row/restart", "POST", { name: "mine" });
+  check(proxied.status === 400 && /not mounted/.test(proxied.json?.error ?? ""), `proxied restart: ${JSON.stringify(proxied.json)}`);
 
-  const unknown = makeRes();
-  await restartRoute.handler(makeReq("POST", "/skill-mcp-manager/row/restart", { name: "nope" }), unknown);
+  const unknown = await fixture.callRoute("/skill-mcp-manager/row/restart", "POST", { name: "nope" });
   check(unknown.status === 400, "an unknown server must refuse a restart");
 }
 
@@ -267,8 +138,6 @@ check(inv.status === 200, `inventory GET status ${inv.status}`);
   check(listDisabledOverrides(two).size === 1, "re-toggle stacked items");
   check(setDisabledOverride(two, "mcp-a", null).trim() === "", "dropping the override left text behind");
 
-  // An override another tool wrote (unquoted, plus-style) is replaced, not
-  // duplicated, and unrelated rows survive.
   const foreign = [
     "# c",
     "- insert:",
@@ -286,7 +155,8 @@ check(inv.status === 200, `inventory GET status ${inv.status}`);
   check(after.includes("serverName: x"), "unrelated rows must survive an override write");
 }
 
-await rm(tmp, { recursive: true, force: true }).catch(() => {});
+await fixture.cleanup();
+
 if (failed.length > 0) {
   console.error("INVENTORY SMOKE FAILED:");
   for (const message of failed) console.error(" - " + message);

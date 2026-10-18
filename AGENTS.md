@@ -6,17 +6,19 @@
 
 **能力库 (Capability)** —— DeepSeek Harness 宿主级插件，把 **Skill 与 MCP 服务器**变成"可视、可管、可注入"的统一目录。
 
-- **MCP**：三档（eager 原生注册 / on-demand 桥 / disabled），模型工具面三件套 `mcp_register` / `mcp_load(peek)` / `mcp_call`，pre-step `mcp-catalog` 注入，boot 导入并接管原生 `dsh-mcp-client` 条目。
+- **MCP（v2：管理而不接管）**：补丁层就是唯一真源——每条 `@deepseek-ai/dsh-mcp-client` 行属于它所在的那一层（用户补丁层或某个 bundle 层），插件不写托管块、不存配置副本。三档全部是补丁层事实：eager（常驻，什么都不写，原生客户端加载）/ on-demand（写 `disabled` 覆盖 + 本插件的桥惰性启动）/ disabled（只写覆盖）。模型工具面三件套 `mcp_register`（写用户补丁层）/ `mcp_load(peek)` / `mcp_call`，pre-step `mcp-catalog` 注入，启动时一次性迁移 v1 的托管块。
 - **Skill**：递归扫描 `customRecursiveDirs`（任意深度只认 `<dir>/SKILL.md`，避免把SKILL下的reference或其他文档也扫进去），frontmatter 启停、跨平台删除、系统编辑器打开、shipped 只读护栏。
 
 ## 目录结构
 
 ```
-lib/index.js    宿主主模块：MCP 三件套、连接/快照、导入接管、reconcile、预热、catalog 注入、UI RPC handlers
+lib/index.js    宿主主模块：MCP 三件套、连接/快照、档位与覆盖项、v1→v2 迁移、catalog 注入、UI RPC handlers
+lib/rows.js     补丁行发现（用户层 + bundle 层静态解析 + `!!js` 求值 + `disabled` 覆盖项读写 + 行删除/emit）
+lib/agents.js   按 profile 的插件私有状态（代理行及其逐工具开关、快照缓存、备注）
 lib/mcp-result.js MCP 工具结果投影：与 dsh-mcp-client 相同的正文、图片准入和 structuredContent
 lib/stdio-transport.js 自建 stdio 传输层（ResilientStdioTransport）：线协议与 SDK 一致，超限响应合成为 JSON-RPC 错误而不断连
 lib/child-env.js 本地工具的环境：密钥与 DSH_ 不继承，$NAME 整段展开
-lib/profile-target.js 管理目标 profile 的解析（profileContext 优先，argv/位置参数兜底）、名字校验、profile 枚举、registry.<profile>.json 命名
+lib/profile-target.js 运行 profile 的解析（profileContext 优先，argv/位置参数兜底）、名字校验、profile 枚举（视图切换用）
 lib/skill.js    递归 skill provider + frontmatter 编辑（setDisableModelInvocation）
 lib/ui.js       HTTP 路由 + /skills /mcp 命令 + 跨平台 open/trash + 密钥打码 + entryView + 浏览器主机名检查
 lib/session-audit.js 历史会话审核（一次性，只读）：切帧 + 逐帧解码检出旧版 source，唯一写入是插件自己的 session-audit.json
@@ -46,34 +48,32 @@ docs/           程序架构（DESIGN.zh.md）、交接（HANDOFF.md）、截图
 
 ### 数据
 
-- `~/.dsh/skill-mcp-manager/registry.<profile>.json` —— MCP 注册表（权威），**按管理目标 profile 分账**；旧版单文件 `registry.json` 首次启动时归入旧版探测到的 profile 并保留 `.bak-<ts>`。
-- `~/.dsh/skill-mcp-manager/settings.json` —— 插件设置（`customRecursiveDirs`、`toolDescriptionMaxLength`、`stdioMaxBufferSizeMb`、`localCommandApproval`、`lanHostAllowlist`、`managedProfile`）。后四项只在设置页改，不进安装配置；`managedProfile` 是设置页选择的 profile（`auto` = 强制自动探测；空/缺省 = 未设置）。
-- `~/.dsh/profiles/<profile>/cordis.patch.yml` —— **当前目标 profile** 被 reconcile 的 patch：全部 MCP 行收敛进托管块（`MANAGED_MARKER` 与 `MANAGED_END_MARKER` 之间），由该 profile 的注册表整体重生成，每条目一行 `disabled: true`。路径来自 `profileContext.patchPath` 或 `join(profilesRoot, name, "cordis.patch.yml")`。
+- `~/.dsh/skill-mcp-manager/agents.<profile>.json` —— 插件私有状态（v2）：本插件代理（按需档）的行及逐工具开关、快照缓存、备注。没有按需行时文件不存在。**MCP 定义不在这里**——它们在 profile 的补丁层。
+- `~/.dsh/skill-mcp-manager/settings.json` —— 插件设置（`customRecursiveDirs`、`toolDescriptionMaxLength`、`stdioMaxBufferSizeMb`、`localCommandApproval`、`lanHostAllowlist`、`viewProfile`）。后四项只在设置页改，不进安装配置；`viewProfile` 只是**显示视图**（空/缺省 = 跟随运行中的 profile），与「运行哪个 profile」无关。旧的 `managedProfile` 被忽略。
+- `~/.dsh/profiles/<profile>/cordis.patch.yml` —— **运行 profile 的用户补丁层**：MCP 行是手写或由 `mcp_register` 追加的 `- insert:` 行，启停是顶层 `- id: <id>` + `disabled: true|false` 覆盖项。v2 不再写托管块（`MANAGED_MARKER` 只在迁移时被读取并拆除）。路径来自 `profileContext.patchPath` 或 `join(profilesRoot, name, "cordis.patch.yml")`。
 
 ### 每次启动顺序（lib/index.js 的 apply → startup）
 
-1. 读 settings.json（覆盖 `toolDescriptionMaxLength`、`stdioMaxBufferSizeMb`、`localCommandApproval`、`lanHostAllowlist`）——**必须在解析目标之前**，`managedProfile` 参与解析
-2. 解析目标 profile（`targetFor()` → `resolveProfileTarget()`）：settings 选择 > 安装配置 `profile` > `ctx.profileContext` > argv `--profile` > argv 位置参数 > `web`
-3. `migrateLegacyRegistry()` —— 一次性把旧 `registry.json` 归入旧版探测到的 profile（保留 `.bak-<ts>`）
-4. `loadRegistry(dataDir)` —— 读**当前目标**的 `registry.<profile>.json`
-5. `reconcile()` —— 吸收 + 托管块整体重生成：扫描**整个补丁文件**的 dsh-mcp-client 行，未认领的按行 id 吸收进注册表；托管块由注册表整体重生成（每条目恰好一行、disabled、重复 id 拒绝写盘），托管块外被认领的原生行从原位置移除
-6. `warmSnapshots()` —— 无缓存或 `metaFetchedAt` 为空的条目一次性试连、抓工具快照 + 服务器元信息后关闭，不留下运行实例（写盘前确认注册表没被切换换掉）
-7. eager 实例改到各会话首次 `agent/pre-step` 时在该会话 `agent.ctx` 上启动
+1. `bootedTarget = targetFor(ctx, config)` —— 解析**运行** profile（`resolveProfileTarget()`：安装配置 `profile` > `ctx.profileContext` > argv `--profile` > argv 位置参数 > `web`）。v2 的解析不读 settings，所以在 apply 早期就能确定（audit runner 也用它）。
+2. 读 settings.json（`toolDescriptionMaxLength`、`stdioMaxBufferSizeMb`、`localCommandApproval`、`lanHostAllowlist`、`viewProfile`）
+3. `migrateManagedProfile(bootedTarget)` —— 一次性 v1→v2：拆托管块、按原文写回吸收过的行、按旧档位补覆盖/代理记录、归档 `registry.<profile>.json.migrated-<ts>.bak`（幂等，第二次是 no-op）
+4. `loadAgents(dataDir, bootedTarget.name)` + `sweepOrphanAgents()` —— 代理状态与孤儿清理
+5. **没有预热**：按需行只在会话 `mcp_load` 或界面「刷新快照」时连接；启动过程不拉起任何 MCP 进程
 
 ## 关键设计决策（改动前务必遵守）
 
-- **管理目标 profile：宿主说什么就是什么，绝不猜 argv**（2026-10-18）：旧实现只看 `--profile`，而 DSH Desktop 的宿主命令行没有这个参数（profile 目录是位置参数），于是回落到 schema 默认 `web`，桌面端插件一直管错 profile、界面两页全空。现在的解析链见「每次启动顺序」第 2 步，第一手来源是 `ctx.profileContext`（boot 层 provide，含精确 `patchPath`）。**注册表按 profile 分账**（`registry.<profile>.json`），切换目标必须走 `switchTarget()`：先读新账本 → `handoverTarget()` 把旧目标按 `rawConfig` + `rawDisabled` 逐字交还（注册表原生条目只留账本不写补丁）→ 换账 → `reconcile()` → 持久化 `managedProfile` → 丢弃所有会话实例 → 后台预热。UI 的 settings POST 拒绝改目标，只有 `POST /skill-mcp-manager/profile` 能切。
-- **原生行的加载器表达式：补丁用原文、注册表用求值值**（2026-10-18 真机踩到）：原生 `dsh-mcp-client` 行可能带 `!!js …`。YAML 解析求不了它（拿到的是字面字符串），所以两处必须分开处理：`rawEntryText` 保存**逐字原文**用于回写托管块/交还（`parseNativeMcpEntries` 用 `LOADER_JS_TAG` 自定义 tag 拿表达式 + `rowTextAt` 剥离尾部空行/注释），`rawConfig`/条目字段保存**求值后**的值用于启动服务器（`materializeLoaderExpressions` + `node:vm` 沙箱：只给 `process` 只读视图、`dshHomePath`、`path`，1s 超时、禁 codegen）。**任一处求值失败 → 该行不接管**（留原位、warn），否则会拿字面表达式当命令启动。mcp_register 重建条目时两者都丢（按字段模型走）。测试：`import-smoke` 第 10 节（原文保真、求值、幂等、交还、注释不重复）与 `profile-switch-smoke`（切换路径）。
+- **运行 profile：宿主说什么就是什么，绝不猜 argv**（2026-10-18）：旧实现只看 `--profile`，而 DSH Desktop 的宿主命令行没有这个参数（profile 目录是位置参数），于是回落到 schema 默认 `web`，桌面端插件一直管错 profile、界面两页全空。现在的解析链见「每次启动顺序」第 2 步，第一手来源是 `ctx.profileContext`（boot 层 provide，含精确 `patchPath`）。**注册表按 profile 分账**（`registry.<profile>.json`），切换目标必须走 `switchTarget()`：先读新账本 → `handoverTarget()` 把旧目标按 `rawConfig` + `rawDisabled` 逐字交还（注册表原生条目只留账本不写补丁）→ 换账 → `reconcile()` → 持久化 `managedProfile` → 丢弃所有会话实例 → 后台预热。UI 的 settings POST 拒绝改目标，只有 `POST /skill-mcp-manager/profile` 能切。
+- **行的加载器表达式：回写用原文、启动用求值值**（2026-10-18 真机踩到）：`dsh-mcp-client` 行可能带 `!!js …`。YAML 解析求不了它（拿到的是字面字符串），所以两处必须分开处理：`rawText` 保存**逐字原文**用于任何回写（`parseMcpRows` 用 `LOADER_JS_TAG` 自定义 tag 拿表达式 + `rowTextAt` 剥离尾部空行/注释），求值后的 `config` 用于启动服务器/展示（`materializeLoaderExpressions` + `node:vm` 沙箱：只给 `process` 只读视图、`dshHomePath`、`path`，1s 超时、禁 codegen）。**求值失败的行仍会列出**（标记 `unevaluated`）但不可由本插件启动，否则会拿字面表达式当命令启动；迁移时这类行仍按原文写回。测试：`test/migration-smoke.mjs`（原文保真、档位映射、幂等）与 `test/inventory-smoke.mjs`（清单/覆盖项）。
 - **Skill 作用域用租约，不用一次性 key**（2026-10-18）：内建 `dsh-skill-filesystem` 挂在 agent preset 层。0.1.x 用 `agentPresets.standingKeyFor()`；0.2.0-rc.2 移除了它，改用 `agentPresets.acquireScope(id)` → `{ key, [Symbol.asyncDispose] }`，**key 只在租约内有效**，所以 `withSkillScope(fn)` 把 `list` + 每条 `get` 都放进 `fn` 里、读完再 dispose。API 缺失或抛错一律回落 `{}`（只丢预设层技能，页面不报错）。改这里前先确认两条 API 都在不在：`asr` 里搜 `standingKeyFor` / `acquireScope`。
-- **on-demand 桥 = 前缀零失效**：on-demand 条目不注册原生 schema，模型只看到 `mcp_load/mcp_call/mcp_register`。eager 才原生注册。
-- **MCP 运行实例按会话隔离**：同一配置在每个 DSH 会话（含子代理）各自创建/销毁 stdio 子进程或 HTTP 连接。eager 工具注册到该会话的 `agent.ctx`，不写入 Host 全局工具表。配置（注册表、档位、黑名单、密钥、备注）仍全局共享。
+- **on-demand 桥 = 前缀零失效**：on-demand 行由本插件的桥持有（不注册原生 schema），模型只看到 `mcp_load/mcp_call/mcp_register`。eager 档现在等于「交给原生 `dsh-mcp-client` 加载」——插件**不再**自己常驻注册任何 MCP 工具。
+- **MCP 运行实例按会话隔离**：同一配置在每个 DSH 会话（含子代理）各自创建/销毁 stdio 子进程或 HTTP 连接（按需档由本插件的桥持有）。eager 行的连接与工具注册完全由原生 `dsh-mcp-client` 负责。补丁层配置全局共享。
 - **名称语义**：`entry.name`（本地名）= 模型命名空间，必须 `[A-Za-z0-9_-]{1,32}`（拼进 `mcp__<name>__<tool>`）；`entry.serverName`（服务器自报名）= 只读元信息，来自 `serverInfo.name`，可与本地名不同。
 - **本地 `description` 已删除**：描述完全来自服务器自报 `serverDescription`；`mcp_register` 无 `description` 参数。`notes` 是用户维护，永不被覆盖。
 - **元信息字段**：`serverName / serverVersion / serverTitle / serverDescription / websiteUrl / instructions / capabilities / metaFetchedAt`，由 `applyServerMetadata(entry, connection)` 在连接时填充，只读。
 - **接管 = 全量合并 + id 主键**：`cordis.patch.yml` 的 MCP 配置全部收敛进托管块，每次启动由注册表整体重生成（一个 MCP 一行、disabled；重复 loader id 拒绝写盘）。吸收按**行 id（systemEntryId）**对账，名字（serverName）不参与——改名、手写新行、serverName 漂移都不会产生重复条目或重复 id。吸收的行保留原始 config（`rawConfig`），`mcp_register` 修改后按字段模型重生成。
 - **管理页 Skill 列表要带 preset scope**：内建 `dsh-skill-filesystem` 挂在 agent preset 层。`ctx.skills.list()` 不传 `scope` 只看全局层（本插件递归 provider）；AI 目录注入传 `scope: agent` 所以能看到 `~/.dsh/skills`。Host UI 用 `ctx.get("agentPresets")?.standingKeyFor()` 作为 scope。
 - **shipped 技能只读**：路径含 `node_modules` 或 `app.asar` 的技能（如 cordis preset 的）只能查看/打开，禁止启停/删除（`isReadonlySkillPath`）。
-- **托管块外零残留**：`reconcile` 只重写 `MANAGED_MARKER`…`MANAGED_END_MARKER` 之间的内容；托管块外被注册表认领的 dsh-mcp-client 行从原位置移除（空的 `- insert:` 块一并清理），未认领行原样保留，非 MCP 内容 byte-for-byte 保留。夹在中间的非 MCP 行挪到结束标记之后。旧文件只有起始标记时，起始之后能认出的 MCP 当中间、认不出的当后缀，并补上结束标记。写前 `.bak-<ts>` 备份，只留最近 5 份。
+- **补丁层写盘只碰自己写的东西**（v2）：插件只追加/删除 `- insert:` 行与顶层 `- id:` 覆盖项，其余字节原样保留；写前把整个文档重新解析校验（失败即拒绝写），并留 `.bak-<ts>` 备份（只保留最近 5 份）。行 id 既做模式校验（`^[A-Za-z0-9._:@/-]{1,200}$`）又以 JSON 字符串写入，杜绝借 id 注入 YAML 行。目标补丁文件不存在时按空文档创建（父目录 `mkdir -p`）。
 - **注入零双重标准（2026-09-07）**：任何注入到模型的消息，GUI「上下文注入」卡片展开后人类看到的就是模型收到的原文——插件注入**不声明宿主的结构化 form**（缺省/未知 form 由宿主 OpaqueBody 渲染模型正文原文），且 **source 不携带正文之外的冗余数据**（OpaqueBody 的 SourceFields 会显示 source 每个字段，携带 entries 会把同一信息渲染两遍）。source = `{kind:"plugin:dsh-skill-mcp-manager"}`（卡片来源标签就是这个 kind 原样显示，`kind` 本身在 SourceFields 里永远隐藏）。
 - **注入 source 只用内核已认识的形状（2026-09-11 事故、2026-09-28 事故教训）**：released 迁移边用**封闭集合**审计 message source——v2→v3 的 `SOURCE_KINDS` 只认 15 个内置 kind，v0→v1 的 `pluginSourceValue` 对 `plugin` 源只放行 `{kind, plugin}` + `form`/`sections`/`summary`；自定义 kind 或 `digest` 成员会让**历史日志在下一次格式换代时整体打不开**（本机 552/574 个 v0 会话因此失效；v3 新会话却一切正常，因为 v3 读写不审计 kind）。**反向的坑在 v4**：会话格式 v4 的**写入端**废弃了裸 `kind:"plugin"` + `plugin` 组合，`dsh-session-format-v3-to-v4` 的 `source()` 只收非空且不等于 `"plugin"` 的 kind，命中即抛 `format v4 message requires a producer-owned source kind`——2026-09-28 升级到内核 0.1.7-rc.2 后，本插件每轮注入的目录消息因此在 `encodeEvent` 落盘时被拒，**每一轮对话都失败**。现在的形状是生产者自有 kind `plugin:<插件名>`，它同时是内核 v3→v4 边对未登记第三方插件名的回退产物（`producerKind()` → `` `plugin:${plugin}` ``；`RENAMED_PRODUCERS` / `RELEASED_SAME_NAME_PRODUCERS` 里没有本插件），所以旧日志迁移后与新写入逐字相同。改动 kind 前先确认这两条边：迁移边吃 `{kind:"plugin", plugin}`，v4 写入端只吃 `plugin:<名>`。
 - **目录注入按正文判等 + eventAt 倒序**：entries 投影（name/tier/description/notes/启用工具 name+description）唯一决定模型可见正文；该正文已随消息 content 持久化，故不再另存 digest（source 只有 `kind` 一个成员，也没有放 digest 的位置）。可见性判定用 `session.eventAt` 倒序遍历持久日志、取 surface 上仍可见的最新一条本插件目录消息，把它的正文与此刻渲染的正文**逐字比对**，判据只看 `source.kind`（宿主 Session 无 `events` 属性——公开 API 是 `eventAt`/`seq`/`snapshotEvents`，不要读 `session.events`；source 不是本插件归属、或正文缺失/损坏的记录视为「非本插件目录」）。正文变了才重新注入（追加替换，不改历史）；是否已注入看会话 surface 上可见的目录消息（对齐内建 `skill-catalog`），不要用进程内 WeakMap：压缩会把旧目录移出 surface，正文未变也必须重注。测试 mock 必须模拟真机 Session 形状（`seq` + `eventAt` + `surface.nodes`）并回写**完整 message（content + source）**，不要模拟 `session.events`，也不要只回写 source。
@@ -109,20 +109,21 @@ node test/smoke.mjs            # 三件套 + 命令注册
 node test/schema-check.mjs     # 工具 schema 校验
 node test/skill-smoke.mjs      # 递归 provider
 node test/watcher-smoke.mjs    # watcher 热生效
-node test/import-smoke.mjs     # 原生导入 + 接管（隔离 DSH_HOME，勿连真实网络）
+node test/migration-smoke.mjs  # v1→v2 迁移：拆托管块、按原文写回、档位映射、注册表归档、二次启动 no-op
+node test/profile-view-smoke.mjs # 跨 profile 静态发现（含 bundle 行）、非运行 profile 只读、视图切换持久化
+node test/helpers/boot.mjs     # v2 测试夹具：临时 DSH_HOME + 补丁行/覆盖项/agents 状态 + mock ctx 与路由驱动
 node test/ui-smoke.mjs         # HTTP 路由 + 只读护栏 + ctx.inject 路径 + settings 的 stdioMaxBufferSizeMb round-trip
 node test/frontmatter-smoke.mjs# frontmatter 启停写入
 node test/catalog-smoke.mjs     # 压缩后 mcp-catalog 按 surface 重注
-node test/tool-disable-smoke.mjs# 单工具黑名单：隐藏、原生注册过滤、桥/旧 execute 拒绝、UI 持久化
+node test/tool-disable-smoke.mjs# 按需行的逐工具开关：catalog/mcp_load 隐藏、mcp_call 拒绝、UI 持久化、常驻行不注册原生工具
 node test/session-isolate-smoke.mjs# 会话级 MCP 实例隔离：双会话进程、销毁互不影响、刷新快照不共享实例
-node test/mcp-call-guard-smoke.mjs # mcp_call 参数形状守卫 + 工具调用错误上下文（桥与 eager 双路径）
+node test/mcp-call-guard-smoke.mjs # mcp_call 参数形状守卫 + 工具调用错误上下文（桥路径）+ 常驻行拒绝
 node test/mcp-result-smoke.mjs # MCP 工具结果投影：文本、图片准入、resource/audio、structuredContent
-node test/mcp-load-schema-smoke.mjs # mcp_load（load/peek）与 registry 快照包含 inputSchema
+node test/mcp-load-schema-smoke.mjs # mcp_load（load/peek）与 agents 快照包含 inputSchema；常驻行不可桥接
 node test/session-audit-smoke.mjs# 历史会话审核：候选筛选、扫到 0 静默退休、受影响保持重扫
-node test/security-smoke.mjs   # 环境过滤、$NAME 展开、浏览器主机名、本地命令审批、常驻失败降级、备份保留 5 份
+node test/security-smoke.mjs   # 环境过滤、$NAME 展开、浏览器主机名、本地命令审批、启动/每回合不拉起进程（惰性桥）、备份保留 5 份
 node test/stdio-transport-smoke.mjs # stdio 超限优雅拒绝：流状态机（无子进程）+ e2e 节需真实运行时（沙箱 spawn EPERM 自动跳过）
-node test/profile-target-smoke.mjs # 目标解析优先级（settings/config/context/argv/位置参数/兜底）、patchPath、名字校验、分账文件名、profile 枚举
-node test/profile-switch-smoke.mjs # 启动跟随 profileContext；切 web 时 desktop 逐字交还、web 接管并保持原生 disabled、两账本互不污染、切回再接管、非法目标不落盘、清空覆盖回落到运行 profile
+node test/profile-target-smoke.mjs # 目标解析优先级（config/context/argv/位置参数/兜底）、patchPath、名字校验、profile 枚举
 node test/skill-scope-smoke.mjs # 技能作用域：standingKeyFor 路径、acquireScope 租约路径（list/get 同一 key、读取期间未释放、读完恰好释放一次）、无 API/抛错回落全局层
 
 # 装进 desktop profile —— 本机当前是 npm 托管的精确版本（跟随市场安装），不是 link:
@@ -154,11 +155,11 @@ pnpm add "dsh-skill-mcp-manager@<精确版本>"           # 托管模式（市�
 
 - **别用命令行参数猜 profile**（2026-10-18 真机踩到）：DSH Desktop 的宿主命令行是 `… dsh-desktop-host/lib/index.js <dshDir> <profileDir> <runtime> …`，**没有** `--profile`；只用 argv 的旧实现因此回落到默认 `web`，桌面端 reconcile 了 web 的补丁、导入 0 条、`registry.json` 不落盘，界面 SKILL / MCP 两页全空（用户报「装了却读不到」）。认 profile 认 `ctx.profileContext`（含 `patchPath`），argv 只作兜底。排查信号：`profiles/<另一个 profile>/cordis.patch.yml` 被写了托管块 + `.bak`，而当前 profile 的补丁纹丝不动。
 - **`standingKeyFor` 在 0.2.0-rc.2 已不存在**：Skill 作用域改 `agentPresets.acquireScope(id)` 的租约（`{ key, [Symbol.asyncDispose] }`），key 只在租约内有效；写成「取一次 key 再用」会让页签又空掉。判断当前内核有没有这个 API：在 `app.asar` 里搜字符串（0 命中即已移除）。
-- **测试里的注册表文件名与 profile 同名**：`registry.__test__.json` / `registry.test.json` / …；profile 名允许下划线开头（`__test__` 哨兵），首字符不允许点号。直接写 `registry.json` 的测试会在新版本下读到空账本（表现为「MCP xxx is not registered」）。
+- **测试数据文件名与 profile 同名**（v2）：插件私有状态是 `agents.__test__.json`（旧版是 `registry.__test__.json`，只用于迁移测试的输入）；profile 名允许下划线开头（`__test__` 哨兵），首字符不允许点号。写死 `agents.json`（无 profile 段）会读不到状态，表现为档位/工具开关不生效。
 - **启动看门狗约 120 秒：`apply()` 里既不能 `await` 慢操作，也不能用短延时定时器绕开**（2026-09-14 两次把 DSH 打进安全模式）：桌面端 host 对 `host-boot` 阶段有约 123 秒看门狗（实测 `lifecycle-events/startup.jsonl` 的 `stage.failed durationMs=123058`），超时即判失败进安全模式。插件的 `apply()` 发生在**启动早期**，所以"`await` 进 `apply()`"和"`setTimeout(8000)` 之后跑"**都落在这个窗口里**——本插件的一次 30–136 秒历史会话审计两种排法都试过，两次都进安全模式；而且扫描重到会被看门狗杀掉，记录写不进去，下次启动又重扫，形成死循环。排查信号：host 日志里**连 `skill-mcp-manager: ready` 都没有**。规则：启动路径只做必要且快的事；任何重活都不要按"启动后 N 秒"排，要挂到**明确晚于 boot 的事件**上（本插件用的是第一个 UI 请求）。同类坑还有 2026-09-11 的"单个插件加载失败 → 整棵插件树失败 → 安全模式"。
 - **`file:` 依赖是拷贝，改源码后重启 DSH 完全无效**（2026-09-11 实际踩到，本机一度跑着一周前的代码）：profile 里 `file:` 装的插件是**真实文件副本**，仓库源码改动不会跟过去。本机 desktop profile 曾改为 `link:`（pnpm 在 Windows 上把它实现为 **Junction**，同 profile 的 `dsh-pocket` 也是这个形态，改源码后重启 DSH 即生效），**现已回到 npm 托管的精确版本**（跟随市场安装）——源码改动同样不跟随，开发调试时再临时换回 `link:`。`link:` 两点注意：① `link:` 后插件从**源目录**解析依赖，仓库自己的 `node_modules` 必须装齐（含 peerDeps，用 `pnpm install --config.auto-install-peers=true`），宿主的 `@deepseek-ai/*` 仍由 DSH 加载器按 specifier 提供，不受物理位置影响；② pnpm 会把该插件的依赖树从 profile 的锁文件里移除（本机实测 779 行删除 / 2 行新增），属预期。
-- **测试不能碰真实 profile**：测试里 `profile` 用 `"__test__"`（不存在）且 `importNativeMcp: false`，否则 `importNative`/`reconcile` 会读写真实 `~/.dsh/profiles/web|desktop/cordis.patch.yml`（历史上污染过一次）。同一个 `__test__` 哨兵也被历史会话审核用来跳过扫描——否则每个调用 `apply()` 的测试都会去读真实的 `~/.dsh/sessions`（本机实测每个测试多花 30–50 秒，且违反隔离约定）。
-- **import-smoke 的 MCP URL 用本地死端口**（`http://127.0.0.1:1/`）：预热会尝试连接，别让它真连外部服务。
+- **测试不能碰真实 profile**：v2 里档位路由/`mcp_register` 会**写** booted profile 的补丁，所以测试必须在 `import lib/index.js` **之前**把 `process.env.DSH_HOME` 指向临时目录（模块级常量在 import 时求值），再用 `config.profile = "__test__"`。用 `test/helpers/boot.mjs` 的夹具最省事；历史上污染过一次）。同一个 `__test__` 哨兵也被历史会话审核用来跳过扫描——否则每个调用 `apply()` 的测试都会去读真实的 `~/.dsh/sessions`（本机实测每个测试多花 30–50 秒，且违反隔离约定）。
+- **别让测试连接外部服务**：需要 URL 的桩服务器一律用本地死端口（`http://127.0.0.1:1/`）或本地 stdio 脚本；v2 不再有启动预热，只有 `mcp_load`/「刷新快照」会试连。
 - **前端加了新的 GET+POST 同 path 路由**：必须合并成单条 handler（见上文）。
 - **bundle 自动挂载 + 用户补丁旧 insert 行 = 组合无法启动**（2026-08-28 实际发生过）：包自带的 `cordis.patch.yml`（`dsh.bundle.patch`）会自动 insert 挂载行；从手动挂载时代升级过来的 profile 若还留着同 id 的手写 insert 行，组合里出现两行同 id，所有插件更新的 trial 校验都会失败回滚，且**下次重启无法启动**。修复：用户补丁里改成同 id 的纯配置覆盖行（不写 insert）。本机 desktop profile 已于 2026-08-28 修复并校验通过。
 - **新增配置项**：记得同步 `Config` schema、`cordis.patch.example.yml`、README 配置表。

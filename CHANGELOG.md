@@ -2,6 +2,29 @@
 
 All notable changes to dsh-skill-mcp-manager (能力库 / Capability) are documented here.
 
+## [2.0.0-local.1] — 2026-10-19
+
+本地维护分支（**不是上游 npm 发布**；来源与安装方式见 [`docs/LOCAL-FORK.zh.md`](docs/LOCAL-FORK.zh.md)）。
+**破坏性重构：取消「接管」——插件不再拥有任何 MCP 配置。**
+
+### Changed（breaking）
+
+- **MCP 管理不再"接管"**：旧版把 profile 补丁层里的 `dsh-mcp-client` 行吸收进插件账本（`registry.<profile>.json`），并在补丁里写一个带标记的「托管块」（每条目一行、统一 `disabled`），再由插件自己启动这些服务器——于是「插件管理」实际上等于「插件拥有」。现在**补丁层就是唯一真源**：插件不写托管块、不保存配置副本；全部私有状态只剩一个按 profile 的轻量文件 `agents.<profile>.json`（且只在插件代理某行时才产生）。每条 `dsh-mcp-client` 行都属于它所在的那一层（用户补丁层，或某个 bundle 层）。
+- **档位语义重定义**（模型面词汇保持 eager/on-demand/disabled 不变）：**eager = 常驻**，由原生 `dsh-mcp-client` 加载（默认；插件不写任何东西）；**on-demand = 按需**，写一条 `disabled` 覆盖按住原生客户端、由本插件的桥启动（`mcp_load`/`mcp_call` + 逐工具开关），代理记录存进 `agents.<profile>.json`；**disabled = 关闭**，只写覆盖、无人加载。三者都是补丁层的可逆事实——手工删掉覆盖行，该行就自动回到常驻（插件启动时清理孤儿记录）。
+- **profile 选择变成「查看哪个 profile 的清单」**：不再有「管理目标 / 交还 / 接管」。运行中的 profile 由 `ctx.profileContext` 决定，是唯一可写的；`settings.json` 的 `viewProfile` 只决定页面显示哪个 profile（非运行中的 profile 显示**静态清单**：行来自它的补丁层与各 bundle 层，无实时数据、只读）。旧 `managedProfile` 设置被忽略。
+- **跨 profile 静态发现（新 `lib/rows.js`）**：按 `<profile>/package.json` 的 `dsh.profile.bundles` 顺序解析每个 bundle（从 node_modules 解 symlink/junction）→ 读它的 `dsh.bundle.patch`（默认 `cordis.patch.yml`）→ 解析其中的 `dsh-mcp-client` 行；再叠加用户补丁层（同 id 的行**整体替换**下层 config，纯 `- id:` 覆盖项可翻转任意行）。`!!js` 表达式保持原文用于回写、单独求值用于启动。exa / calagopus 这类由独立 bundle 提供的 MCP 因此能稳定显示，不再依赖当前进程的 loader。
+- **启动不再预热**：按需行只在会话调用 `mcp_load` 或界面「刷新快照」时连接；启动过程不会拉起任何 MCP 进程。
+- **`mcp_register` 改写用户补丁层**：新增 MCP = 在 `<profile>/cordis.patch.yml` 追加一条 `- insert:` 行（插件卸载后配置仍在、并由原生客户端加载），随后按档位写覆盖/代理记录；支持只给 `notes`/`tier` 的部分更新（不重连、不重启程序）。
+- **v1 → v2 自动迁移**：启动时若发现旧「托管块」或 `registry.<profile>.json`，一次性拆除托管块、把吸收过的行按原文（含 `!!js`）与原 `disabled` 标志写回用户层、按旧档位补覆盖/代理记录，并把注册表归档为 `registry.<profile>.json.migrated-<ts>.bak`（**不删除**）。
+- 路由调整：`POST /mcp/tier` `{rowId, tier}`、`POST /mcp/tool-tier` `{rowId, tool, enabled}`、`POST /mcp/delete` `{rowId}`、`POST /row/snapshot` `{rowId}`、`GET /inventory?profile=`；`POST /profile` 改为设置视图（`{name}`，空串 = 跟随运行中的 profile）。`/mcp prepare-uninstall` 简化为「删掉本插件写过的覆盖项与代理状态」。
+- 测试改造：新增 `test/migration-smoke.mjs`（v1→v2 迁移逐项断言）、`test/profile-view-smoke.mjs`（跨 profile 静态发现 / 只读 / 视图切换）、`test/helpers/boot.mjs`（v2 夹具）；重写 inventory / tool-disable / session-isolate / mcp-load-schema / mcp-call-guard / mcp-result / catalog / ui / client-contract / security；删除已被取代的 `import-smoke.mjs` 与 `profile-switch-smoke.mjs`（原件备份在 `.trash/superseded-tests/`，同时保留在 git 历史中）。
+
+### Added
+
+- `lib/rows.js`：补丁行发现（用户层 + bundle 层 + 静态解析）、`!!js` 求值、`disabled` 覆盖项读写、行删除、新行 emit。
+- `lib/agents.js`：按 profile 的插件私有状态（代理行及其逐工具开关、快照缓存、备注）。
+- booted profile 的清单会补上**只有 live loader 知道的**行（`--patch` 叠加、宿主自带 bundle 等），标记为捆绑来源、只读。
+
 ## [1.4.0-local.1] — 2026-10-18
 
 本地维护分支（**不是上游 npm 发布**；来源与安装方式见 [`docs/LOCAL-FORK.zh.md`](docs/LOCAL-FORK.zh.md)）。

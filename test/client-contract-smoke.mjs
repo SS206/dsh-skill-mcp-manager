@@ -49,7 +49,8 @@ for (const path of used) {
 }
 for (const needed of [
   "/skill-mcp-manager/inventory",
-  "/skill-mcp-manager/row/toggle",
+  "/skill-mcp-manager/mcp/tier",
+  "/skill-mcp-manager/row/snapshot",
   "/skill-mcp-manager/row/restart",
   "/skill-mcp-manager/profile",
   "/skill-mcp-manager/settings",
@@ -97,10 +98,12 @@ if (inventoryRoute !== undefined) {
   }, res);
   const body = res.body ? JSON.parse(res.body) : {};
   check(res.status === 200, `inventory GET status ${res.status}`);
-  check(Array.isArray(body.servers), "the inventory payload has no servers array");
+  check(Array.isArray(body.rows), "the inventory payload has no rows array");
   check(typeof body.counts === "object" && body.counts !== null, "the inventory payload has no counts");
-  check(typeof body.bundleAvailable === "boolean", "the inventory payload has no bundleAvailable flag");
-  check(body.target && typeof body.target.patchPath === "string", "the inventory payload has no target.patchPath");
+  check(body.profile && typeof body.profile.patchPath === "string", "the inventory payload has no profile.patchPath");
+  check(body.profile?.booted === true, "the booted profile should be flagged as booted");
+  check(body.profile?.writable === true, "the booted profile should be writable");
+  check(Array.isArray(body.builtin), "the inventory payload has no builtin array");
 }
 
 await rm(tmp, { recursive: true, force: true }).catch(() => {});
