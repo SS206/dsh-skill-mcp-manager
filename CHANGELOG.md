@@ -10,6 +10,12 @@ All notable changes to dsh-skill-mcp-manager (能力库 / Capability) are docume
 
 - **DSH Desktop 上所有写操作被本插件自己的守卫拒绝（界面报 `untrusted origin`）**：Desktop 的页面从 `dsh-app://` 自定义协议加载，请求经桌面端自有代理转发，**转发时会剥掉 `origin`/`host`/`cookie`/`sec-fetch-site` 四个头**；旧守卫却要求每个 POST 都带一个与 Host 匹配的 Origin（web profile 下 Origin==Host 恒成立，所以上游从未在桌面端测出来），于是桌面上切档位/启停/增删一律 403，而 GET 正常——这正是 dsh-market 记录过的同一个坑（其 issue #648，连报错文案都相同，本插件的守卫就是从它修复前的版本镜像来的）。现在改为 dsh-market 修复后的规则：**Origin 缺失即放行**（浏览器 POST 必带 Origin，缺失说明调用方不是页面，而剥离代理恰好如此）；**Origin 存在则必须可解析且 host 与 Host 相等**（`Origin: null`、空串一律拒绝）；**Host 存在则必须是回环（`127.0.0.1`/`localhost`/`[::1]`）或本插件设置里声明的局域网主机**（Host 是 DNS rebinding 页面唯一伪造不了的头）；**`Sec-Fetch-Site: cross-site` 直接拒绝**。新导出 `loopbackAuthority` / `requestPermitted`；`test/security-smoke.mjs` 覆盖剥离代理、跨源、`null`/空 Origin、非回环 Host 与跨站各分支。
 
+### Added
+
+- **统一 MCP 清单：捆绑/内置/未接管的服务器现在都能看到**。旧列表只认识本插件账本里的条目——exa、calagopus 这类由**独立 bundle** 贡献的 MCP（`~/.dsh/*-mcp-bundle/cordis.patch.yml`，经 profile 的 `dsh.profile.bundles` 组合进 loader 树）完全不出现。新增 `lib/inventory.js` 把四类来源合并成一份清单：**托管**（本插件账本：档位、逐工具开关、会话状态）、**用户补丁**（插件有意未接管、仍原生挂在用户补丁层的行，例如求值失败的 `!!js` 行）、**捆绑**（`ctx.get('loader')` 里 `@deepseek-ai/dsh-mcp-client` 的活动行，按 `config.serverName` 与托管行去重）、**内置**（computer-use / browser-use，只读）。工具表按桥接命名约定 `mcp__<server>__<tool>` 从 `ctx.get('tools').schemas()` 取（内置按 `computerUse → computer_use_` 约定推导）；每行的规范键是 `serverKey`（托管行 = 账本名，其余 = loader 的 `serverName`——托管行模型面的 `serverName` 是服务器自报的实现名，常为空）。新路由 `GET /skill-mcp-manager/inventory`；`/mcp` 命令追加「Other MCP servers」段。管理非当前启动 profile 时捆绑段隐藏（loader 只反映运行中的 profile），`bundleAvailable` 标记这一点。
+- **非托管行可停用/启用与就地重启**。停用走**用户补丁层的 `disabled` 覆盖项**（`- id: <id>` + `disabled: true`，与 dsh-mcp-manager-plus 同一杠杆；profile 以 `patchReload: live` 运行，约 1 秒热生效）：用户补丁层自有的行启用时**删除**覆盖项，bundle 行则写 `disabled: false`（缺席无法把 bundle 层按住的行放开）。覆盖项是顶层 `- id:` 项、无 `insert:`，absorb 与行清理只认 insert 行，所以它们永远不会被当成服务器定义，reconcile 后也原样保留（有测试）。行 id 既做模式校验（`^[A-Za-z0-9._:@/-]{1,200}$`）又**以 JSON 字符串形式写入**，杜绝借 id 注入 YAML 行。就地重启用 `entry.fiber.restart()`（0.2.0-rc.x），旧载入器回退 `entry._dispose()` + `entry.init()`；未挂载/已停用/载入器不支持三种失败各自给出明确报错。新路由 `POST /skill-mcp-manager/row/toggle`、`POST /skill-mcp-manager/row/restart`。
+- 新测试 `test/inventory-smoke.mjs`：四类来源与去重、覆盖项写入/替换/删除与幂等、覆盖项跨 reconcile 保留、YAML 注入拒绝、重启的两代载入器路径。
+
 ## [1.3.0-local.1] — 2026-10-18
 
 本地维护分支（**不是上游 npm 发布**；来源与安装方式见 [`docs/LOCAL-FORK.zh.md`](docs/LOCAL-FORK.zh.md)）。

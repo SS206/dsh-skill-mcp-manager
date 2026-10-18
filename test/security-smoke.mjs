@@ -223,7 +223,10 @@ async function dispose(effects) {
   check(blockedSave.status === 403, "disallowed host added itself");
   const mcp = commands.find((command) => command.name === "mcp");
   const listed = await mcp.handler({ rawInput: "" });
-  check(listed.kind === "success" && listed.text.includes("No MCP"), `bare /mcp did not list: ${listed.text}`);
+  check(
+    listed.kind === "success" && /No managed MCP servers/.test(listed.text),
+    `bare /mcp did not list: ${listed.text}`,
+  );
   const unknown = await mcp.handler({ rawInput: "nope" });
   check(unknown.kind === "error" && unknown.text.includes("prepare-uninstall"), `unknown /mcp did not explain usage: ${unknown.text}`);
   const handed = await mcp.handler({ rawInput: "prepare-uninstall" });
