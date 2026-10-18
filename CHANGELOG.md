@@ -2,6 +2,14 @@
 
 All notable changes to dsh-skill-mcp-manager (能力库 / Capability) are documented here.
 
+## [1.4.0-local.1] — 2026-10-18
+
+本地维护分支（**不是上游 npm 发布**；来源与安装方式见 [`docs/LOCAL-FORK.zh.md`](docs/LOCAL-FORK.zh.md)）。
+
+### Fixed
+
+- **DSH Desktop 上所有写操作被本插件自己的守卫拒绝（界面报 `untrusted origin`）**：Desktop 的页面从 `dsh-app://` 自定义协议加载，请求经桌面端自有代理转发，**转发时会剥掉 `origin`/`host`/`cookie`/`sec-fetch-site` 四个头**；旧守卫却要求每个 POST 都带一个与 Host 匹配的 Origin（web profile 下 Origin==Host 恒成立，所以上游从未在桌面端测出来），于是桌面上切档位/启停/增删一律 403，而 GET 正常——这正是 dsh-market 记录过的同一个坑（其 issue #648，连报错文案都相同，本插件的守卫就是从它修复前的版本镜像来的）。现在改为 dsh-market 修复后的规则：**Origin 缺失即放行**（浏览器 POST 必带 Origin，缺失说明调用方不是页面，而剥离代理恰好如此）；**Origin 存在则必须可解析且 host 与 Host 相等**（`Origin: null`、空串一律拒绝）；**Host 存在则必须是回环（`127.0.0.1`/`localhost`/`[::1]`）或本插件设置里声明的局域网主机**（Host 是 DNS rebinding 页面唯一伪造不了的头）；**`Sec-Fetch-Site: cross-site` 直接拒绝**。新导出 `loopbackAuthority` / `requestPermitted`；`test/security-smoke.mjs` 覆盖剥离代理、跨源、`null`/空 Origin、非回环 Host 与跨站各分支。
+
 ## [1.3.0-local.1] — 2026-10-18
 
 本地维护分支（**不是上游 npm 发布**；来源与安装方式见 [`docs/LOCAL-FORK.zh.md`](docs/LOCAL-FORK.zh.md)）。
