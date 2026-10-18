@@ -2,6 +2,51 @@
 
 All notable changes to dsh-skill-mcp-manager (能力库 / Capability) are documented here.
 
+## [1.4.0-local.1] — 2026-10-18
+
+本地维护分支（**不是上游 npm 发布**；来源与安装方式见 [`docs/LOCAL-FORK.zh.md`](docs/LOCAL-FORK.zh.md)）。
+
+### Fixed
+
+- **DSH Desktop 上所有写操作被本插件自己的守卫拒绝（界面报 `untrusted origin`）**：Desktop 的页面从 `dsh-app://` 自定义协议加载，请求经桌面端自有代理转发，**转发时会剥掉 `origin`/`host`/`cookie`/`sec-fetch-site` 四个头**；旧守卫却要求每个 POST 都带一个与 Host 匹配的 Origin（web profile 下 Origin==Host 恒成立，所以上游从未在桌面端测出来），于是桌面上切档位/启停/增删一律 403，而 GET 正常——这正是 dsh-market 记录过的同一个坑（其 issue #648，连报错文案都相同，本插件的守卫就是从它修复前的版本镜像来的）。现在改为 dsh-market 修复后的规则：**Origin 缺失即放行**（浏览器 POST 必带 Origin，缺失说明调用方不是页面，而剥离代理恰好如此）；**Origin 存在则必须可解析且 host 与 Host 相等**（`Origin: null`、空串一律拒绝）；**Host 存在则必须是回环（`127.0.0.1`/`localhost`/`[::1]`）或本插件设置里声明的局域网主机**（Host 是 DNS rebinding 页面唯一伪造不了的头）；**`Sec-Fetch-Site: cross-site` 直接拒绝**。新导出 `loopbackAuthority` / `requestPermitted`；`test/security-smoke.mjs` 覆盖剥离代理、跨源、`null`/空 Origin、非回环 Host 与跨站各分支。
+
+### Added
+
+- **统一 MCP 清单：捆绑/内置/未接管的服务器现在都能看到**。旧列表只认识本插件账本里的条目——exa、calagopus 这类由**独立 bundle** 贡献的 MCP（`~/.dsh/*-mcp-bundle/cordis.patch.yml`，经 profile 的 `dsh.profile.bundles` 组合进 loader 树）完全不出现。新增 `lib/inventory.js` 把四类来源合并成一份清单：**托管**（本插件账本：档位、逐工具开关、会话状态）、**用户补丁**（插件有意未接管、仍原生挂在用户补丁层的行，例如求值失败的 `!!js` 行）、**捆绑**（`ctx.get('loader')` 里 `@deepseek-ai/dsh-mcp-client` 的活动行，按 `config.serverName` 与托管行去重）、**内置**（computer-use / browser-use，只读）。工具表按桥接命名约定 `mcp__<server>__<tool>` 从 `ctx.get('tools').schemas()` 取（内置按 `computerUse → computer_use_` 约定推导）；每行的规范键是 `serverKey`（托管行 = 账本名，其余 = loader 的 `serverName`——托管行模型面的 `serverName` 是服务器自报的实现名，常为空）。新路由 `GET /skill-mcp-manager/inventory`；`/mcp` 命令追加「Other MCP servers」段。管理非当前启动 profile 时捆绑段隐藏（loader 只反映运行中的 profile），`bundleAvailable` 标记这一点。
+- **非托管行可停用/启用与就地重启**。停用走**用户补丁层的 `disabled` 覆盖项**（`- id: <id>` + `disabled: true`，与 dsh-mcp-manager-plus 同一杠杆；profile 以 `patchReload: live` 运行，约 1 秒热生效）：用户补丁层自有的行启用时**删除**覆盖项，bundle 行则写 `disabled: false`（缺席无法把 bundle 层按住的行放开）。覆盖项是顶层 `- id:` 项、无 `insert:`，absorb 与行清理只认 insert 行，所以它们永远不会被当成服务器定义，reconcile 后也原样保留（有测试）。行 id 既做模式校验（`^[A-Za-z0-9._:@/-]{1,200}$`）又**以 JSON 字符串形式写入**，杜绝借 id 注入 YAML 行。就地重启用 `entry.fiber.restart()`（0.2.0-rc.x），旧载入器回退 `entry._dispose()` + `entry.init()`；未挂载/已停用/载入器不支持三种失败各自给出明确报错。新路由 `POST /skill-mcp-manager/row/toggle`、`POST /skill-mcp-manager/row/restart`。
+- 新测试 `test/inventory-smoke.mjs`：四类来源与去重、覆盖项写入/替换/删除与幂等、覆盖项跨 reconcile 保留、YAML 注入拒绝、重启的两代载入器路径。
+
+### Changed
+
+- **界面重做成「能力库」单页 + 平滑页签，设置搬到插件自身页面**：设置里只有一行「能力库」（`settings.section` id `capability`），内部用分段式页签切换**技能 / MCP**——指示块以 `transform` 滑动（.18s），面板切进来带 ~160ms 淡入上移，`prefers-reduced-motion` 下全部关闭；支持 ←/→ 键与 `role="tab"` 语义。**MCP 页签只留两部分**：顶部「管理 profile」行（目标与来源、补丁路径、危险目标二次确认）+ 按来源分组的统一清单（**托管**：档位三段、逐工具启停、查看描述/刷新快照、删除；**用户补丁**：启停 + 重启 + 只读详情；**捆绑**：启停 + 重启；**内置**：只读），行内显示传输、工具数与「连接失败」徽标，密钥可打码/显示。
+- **插件级设置搬到插件自身页面**：工具描述截断、stdio 消息上限、模型登记本地程序三档、局域网主机名允许名单，改由官方 keyed 座位 `plugins.bundle.config`（`key: "dsh-skill-mcp-manager"`）渲染在 **插件列表 → dsh-skill-mcp-manager** 那一页，并附当前管理目标与补丁路径；`view === "summary"` 时返回 `null`。若宿主从未声明该座位，3 秒后自动回落到一个「能力库设置」设置行，设置不会无处可去。
+- **技能列表把描述收进默认折叠的控件**（原生 `<details>`，键盘可达、无状态）：行内只留名称、只读/来源/可见性徽标、路径、开关与打开/删除，长描述不再把列表撑成文字墙。
+- 样式全部走 DSW 主题别名 token（`--dsw-alias-*`）。客户端在宿主进程尚未重启、还没有 `/inventory` 路由时会**降级**到旧的托管列表并提示重启，不会白屏。
+- 新测试 `test/client-contract-smoke.mjs`：客户端用到的每条 `/skill-mcp-manager/*` 路径都必须有对应路由；单页 + 页签结构、`plugins.bundle.config` 座位与其 key、折叠控件、动画与减少动效守卫、`shell.overlay` 通知位都在断言里。
+
+## [1.3.0-local.1] — 2026-10-18
+
+本地维护分支（**不是上游 npm 发布**；来源与安装方式见 [`docs/LOCAL-FORK.zh.md`](docs/LOCAL-FORK.zh.md)）。
+
+### Fixed
+
+- **DSH Desktop 上认错 profile，界面 SKILL / MCP 两页全空（根因）**：旧实现只从进程 argv 取 `--profile`，而 Desktop 宿主命令行没有这个参数（profile 目录是位置参数），于是回落到 schema 默认值 `web`——reconcile 写的是 `profiles/web/cordis.patch.yml`，desktop 的原生 `dsh-mcp-client` 行从未被导入，注册表也没落盘。现在优先读宿主提供的 `ctx.profileContext`（boot 层 provide 的权威来源，含精确 `patchPath`），`--profile` 与位置参数 `<profilesRoot>/<name>` 仅作兜底。
+- **原生行里的加载器表达式（`!!js …`）在接管时被写成字面字符串**（2026-10-18 真机踩到）：YAML 解析无法求值 `!!js`，`command: !!js process.execPath` 会变成字符串 `"process.execPath"`；用它重新生成托管行等于把表达式换成一条根本跑不起来的命令。现在**行文本逐字回写**（新增 `rawEntryText`），注册表另存**求值后**的值（插件要自己启动服务器）；求值走 YAML 自定义 tag（拿到表达式原文）+ `node:vm` 沙箱（只暴露 `process` 只读视图、`dshHomePath`、`path`，1 秒超时、禁 codegen）；**求值失败的行不接管**、原样留在原位并 warn，绝不拿字面表达式去启动。
+- **行文本不再吞掉尾部的空行/注释**：两条原生行之间的注释描述的是下一行，之前会被卷进上一行的文本、在托管块里重复一份（真实 desktop 补丁实测踩到）。
+- **SKILL 页在 DSH 0.2.0-rc.2 上列不出任何技能**：内建 `dsh-skill-filesystem` 挂在 agent preset 层，而旧实现依赖的 `agentPresets.standingKeyFor()` 在 0.2.0-rc.2 已被移除。改为 `agentPresets.acquireScope(id)` 的租约语义（`{ key, [Symbol.asyncDispose] }`）：list 与每条 get 都在租约内完成、读完释放；API 缺失或抛错时回落全局层，页面照常可用。
+
+### Added
+
+- **管理目标可切换**：MCP 页新增「管理 profile」行——显示目标及其来源、补丁路径与候选 profile，危险目标（非运行中 profile / 未安装本插件的 profile）先警告再二次确认。`POST /skill-mcp-manager/profile` 执行切换：先读新账本（读不出来就中止）→ 把旧目标按 `rawConfig` + 原始 `disabled` 逐字交还（UI 新增条目只留账本、不写补丁）→ 换账 → 接管新目标 → 持久化选择 → 丢弃所有会话实例 → 后台预热；`GET` 同一路径返回目标与候选。`managedProfile` 存 `settings.json`（`auto` = 强制自动探测；空 = 未设置）；settings 的 POST 拒绝改目标。
+- **注册表按 profile 分账**：`registry.<profile>.json`。旧单文件 `registry.json` 首次启动一次性归入「旧版探测到的那个 profile」并保留 `registry.json.bak-<ts>`；切换目标不再把一个 profile 的服务器混进另一个。
+- 新模块 `lib/profile-target.js`（解析链、名字校验、profile 枚举、分账文件名）；新测试 `test/profile-target-smoke.mjs`、`test/profile-switch-smoke.mjs`、`test/skill-scope-smoke.mjs`。
+
+### Changed
+
+- `config.profile` 默认值由 `web` 改为空串（安装期默认，留空 = 跟随本次启动的 profile）。profile 名允许下划线开头（`__test__` 哨兵），首字符不允许点号。
+- `/mcp` 命令输出新增 `Managed profile: <name> (<source>, booted|not booted)` 一行。
+- 直接读写 `registry.json` 的测试改为按 profile 命名的文件；`ui-smoke` 覆盖新路由与 `managedProfile` 字段。
+
 ## [1.2.2] — 2026-10-03
 
 ### Changed

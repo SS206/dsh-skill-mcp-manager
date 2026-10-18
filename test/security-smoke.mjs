@@ -8,7 +8,7 @@ import { hostname } from "node:os";
 import { readFileSync } from "node:fs";
 import { apply, PLUGIN_VERSION, pruneBackups } from "../lib/index.js";
 import { scrubParentEnv, resolveExplicitEnv, childEnv } from "../lib/child-env.js";
-import { hostPermitted } from "../lib/ui.js";
+import { hostPermitted, requestPermitted } from "../lib/ui.js";
 
 const tmp = join(process.cwd(), ".test-data", "security-smoke-" + process.pid);
 const failed = [];
@@ -60,6 +60,33 @@ check(hostPermitted("localhost:7404", []), "localhost was rejected");
 check(hostPermitted(`${hostname()}:7404`, []), "machine hostname was rejected");
 check(!hostPermitted("files.example:7404", []), "LAN hostname was allowed by default");
 check(hostPermitted("Files.Example:7404", ["files.example"]), "allowlist match was case-sensitive");
+
+// Request gate. DSH Desktop's proxy strips Origin and Host before forwarding,
+// so an absent Origin must be allowed; a present-but-mismatched one must not.
+check(requestPermitted({ headers: {} }, []), "a stripped-proxy request was refused");
+check(requestPermitted({ headers: { host: "127.0.0.1:7404" } }, []), "an Origin-less loopback request was refused");
+check(
+  requestPermitted({ headers: { origin: "http://127.0.0.1:7404", host: "127.0.0.1:7404" } }, []),
+  "a same-origin request was refused",
+);
+check(
+  !requestPermitted({ headers: { origin: "http://evil.example:7404", host: "127.0.0.1:7404" } }, []),
+  "a cross-origin request was allowed",
+);
+check(!requestPermitted({ headers: { origin: "null", host: "127.0.0.1:7404" } }, []), "Origin: null was allowed");
+check(!requestPermitted({ headers: { origin: "", host: "127.0.0.1:7404" } }, []), "an empty Origin was allowed");
+check(!requestPermitted({ headers: { host: "evil.example:7404" } }, []), "a non-loopback Host was allowed");
+check(
+  !requestPermitted(
+    { headers: { origin: "http://127.0.0.1:7404", host: "127.0.0.1:7404", "sec-fetch-site": "cross-site" } },
+    [],
+  ),
+  "a cross-site request was allowed",
+);
+check(
+  requestPermitted({ headers: { origin: "http://files.example:7404", host: "files.example:7404" } }, ["files.example"]),
+  "a declared authority was refused",
+);
 
 const backupDir = join(tmp, "backups");
 await mkdir(backupDir, { recursive: true });
@@ -162,8 +189,24 @@ async function dispose(effects) {
   check(openGet.status === 200, `local GET failed: ${openGet.status}`);
   const noOriginGet = await callRoute(routes, "/skill-mcp-manager/mcp", "GET", {});
   check(noOriginGet.status === 200, "non-browser GET was rejected");
+  // The Desktop proxy's shape: no Origin, no Host. It must reach the handler
+  // (400 = "no such entry"), never the old 403.
   const noOriginPost = await callRoute(routes, "/skill-mcp-manager/mcp/delete", "POST", {}, { name: "missing" });
-  check(noOriginPost.status === 403, "non-browser POST without origin was allowed");
+  check(noOriginPost.status === 400, `Desktop-proxy POST never reached the handler: ${noOriginPost.status}`);
+  const loopbackPost = await callRoute(routes, "/skill-mcp-manager/mcp/delete", "POST", { host: "127.0.0.1:7404" }, { name: "missing" });
+  check(loopbackPost.status === 400, `Origin-less POST with a loopback Host was refused: ${loopbackPost.status}`);
+  const nullOrigin = await callRoute(routes, "/skill-mcp-manager/mcp/delete", "POST", { origin: "null", host: "127.0.0.1:7404" }, { name: "missing" });
+  check(nullOrigin.status === 403, "Origin: null was allowed");
+  const crossSite = await callRoute(
+    routes,
+    "/skill-mcp-manager/mcp/delete",
+    "POST",
+    { origin: "http://127.0.0.1:7404", host: "127.0.0.1:7404", "sec-fetch-site": "cross-site" },
+    { name: "missing" },
+  );
+  check(crossSite.status === 403, "a cross-site POST was allowed");
+  const reboundRead = await callRoute(routes, "/skill-mcp-manager/mcp", "GET", { host: "evil.example:7404" });
+  check(reboundRead.status === 403, "a non-loopback Host on a read was allowed");
   const evil = await callRoute(routes, "/skill-mcp-manager/mcp", "GET", { origin: "http://files.example:7404", host: "files.example:7404" });
   check(evil.status === 403, "DNS-rebound hostname was allowed");
   const saved = await callRoute(routes, "/skill-mcp-manager/settings", "POST", local, {
@@ -180,7 +223,10 @@ async function dispose(effects) {
   check(blockedSave.status === 403, "disallowed host added itself");
   const mcp = commands.find((command) => command.name === "mcp");
   const listed = await mcp.handler({ rawInput: "" });
-  check(listed.kind === "success" && listed.text.includes("No MCP"), `bare /mcp did not list: ${listed.text}`);
+  check(
+    listed.kind === "success" && /No managed MCP servers/.test(listed.text),
+    `bare /mcp did not list: ${listed.text}`,
+  );
   const unknown = await mcp.handler({ rawInput: "nope" });
   check(unknown.kind === "error" && unknown.text.includes("prepare-uninstall"), `unknown /mcp did not explain usage: ${unknown.text}`);
   const handed = await mcp.handler({ rawInput: "prepare-uninstall" });
@@ -232,7 +278,7 @@ async function dispose(effects) {
   try { await readFile(marker, "utf8"); started = true; } catch { /* absent */ }
   check(!started, "rejected local command was started");
   let registry = { entries: [] };
-  try { registry = JSON.parse(await readFile(join(dataDir, "registry.json"), "utf8")); } catch { /* absent */ }
+  try { registry = JSON.parse(await readFile(join(dataDir, "registry.__test__.json"), "utf8")); } catch { /* absent */ }
   check(!registry.entries?.some((entry) => entry.name === "local"), "rejected local command was saved");
 
   asks.length = 0;
@@ -332,7 +378,7 @@ async function dispose(effects) {
 {
   const dataDir = join(tmp, "eager");
   await mkdir(dataDir, { recursive: true });
-  await writeFile(join(dataDir, "registry.json"), `${JSON.stringify({
+  await writeFile(join(dataDir, "registry.__test__.json"), `${JSON.stringify({
     version: 1,
     entries: [{
       id: "demo",
@@ -392,7 +438,7 @@ async function dispose(effects) {
   await preStep({ agent, signal }, enter);
   check(native.length === afterFirst, `second turn remounted eager tools: ${native.join(",")}`);
 
-  await writeFile(join(dataDir, "registry.json"), `${JSON.stringify({
+  await writeFile(join(dataDir, "registry.__test__.json"), `${JSON.stringify({
     version: 1,
     entries: [{
       id: "down",
@@ -415,7 +461,7 @@ async function dispose(effects) {
 {
   const dataDir = join(tmp, "eager-down");
   await mkdir(dataDir, { recursive: true });
-  await writeFile(join(dataDir, "registry.json"), `${JSON.stringify({
+  await writeFile(join(dataDir, "registry.__test__.json"), `${JSON.stringify({
     version: 1,
     entries: [{
       id: "down",

@@ -62,10 +62,17 @@ After install the plugin connects once to fetch real tool names and descriptions
 
 `mcp_register` **trial-connects + lists tools before persisting** — only correctly configured servers are admitted.
 
-### 10. Profile-scoped only
+### 10. Profile-scoped by default, switchable on demand
 
-The plugin only manages the profile it is installed into — no overreach, no misplacement.
+By default it manages the **profile this host booted** (read from the host's `profileContext`, never guessed from the command line) — no overreach, no misplacement. When you need it, the settings page can switch the target to web / desktop / another profile: the released profile is handed back to its native MCP config and every profile keeps its own registry.
 
+### 11. Every MCP source in one list, and settings where they belong
+
+**Settings → Capability** is one page with an animated **Skills / MCP** tab strip. The MCP tab holds exactly two things: the managed-profile row (which profile's MCP library the plugin owns, switchable with a two-step confirmation) and one list of every server the deployment can reach — **Managed** (this plugin's registry: three tiers, per-tool switches, delete), **User patch** (rows left in the profile's patch layer), **Bundle** (servers another bundle contributes to the composed loader tree, e.g. exa and calagopus: enable/disable through a patch-layer `disabled` override, restart in place, read-only config) and **Built-in** (computer-use / browser-use). Live tool lists come from the model-facing schemas, so what the page shows is what the model can actually call. Skill descriptions collapse by default, which keeps the list readable.
+
+Plugin-wide settings (tool description truncation, stdio buffer, local-command approval, LAN allowlist) moved to the plugin's own page in the DSH plugin manager — **Plugins → dsh-skill-mcp-manager** — through the official keyed seat `plugins.bundle.config`, with a settings-row fallback for a shell that never declares that seat.
+
+Because the browser half ships separately from the host process, a client newer than the running host degrades to the managed list with a "restart DSH" notice instead of failing.
 ## Install
 
 ```bash
@@ -80,7 +87,11 @@ Then add one row to that profile's `cordis.patch.yml` (see [`cordis.patch.exampl
       name: 'dsh-skill-mcp-manager'
       config:
         dataDir: ''            # empty = ~/.dsh/skill-mcp-manager
-        profile: web           # write the profile you want to manage
+        # '' / auto = follow the booted profile (recommended: the plugin manages
+        # the profile it is installed into; DSH Desktop passes the profile as a
+        # positional argument and never sets --profile).
+        # A name is the install-time default; the settings page can switch it.
+        profile: ''
         trialTimeoutMs: 30000
         toolCallTimeoutMs: 60000
         catalogDescriptionMaxLength: 500
@@ -89,6 +100,8 @@ Then add one row to that profile's `cordis.patch.yml` (see [`cordis.patch.exampl
 ```
 
 Restart the profile. The plugin lives in the Host composition, so the `mcp_register` / `mcp_load` / `mcp_call` trio is visible to every session in that profile; eager tools are registered by each session in its own context, and MCP runtime instances are per-session.
+
+> **Loader expressions:** a native row's `!!js …` expression is **evaluated** for this plugin to launch the server, while the patch keeps the **expression text** (handed back verbatim on switch/uninstall). A row whose expression cannot be evaluated is **not adopted** — it stays native, with a warning in the log.
 
 > **Takeover note:** with `importNativeMcp: true` (default), native `dsh-mcp-client` rows are imported into the capability library and disabled at the native layer — the capability library becomes the single entry point (three tiers, `mcp-catalog`, the UI). Run `/mcp prepare-uninstall` before uninstalling to hand the entries back.
 
@@ -99,6 +112,7 @@ Restart the profile. The plugin lives in the Host composition, so the `mcp_regis
 Open **Settings → Capability**:
 
 - **SKILL tab** — every managed skill (bundle `SKILL.md`), sorted by path: model-visibility switch, open in system editor, cross-platform delete. Skills shipped with the deployment (under `node_modules` / `app.asar`) are read-only: view + open only.
+- **MCP tab → 管理 profile row** — which profile's library this plugin owns (with its source: booted profile / install config / settings), the patch path, and the candidate profiles. Switching hands the released profile back to its pre-takeover patch, adopts the new one, and drops every session instance so the next step rebuilds from the new library. A target that is not the booted profile (or that has no plugin installed) is flagged before it is switched.
 - **MCP tab** — every registered server with tier badges and tool counts: switch tier, inspect details (command / env / headers / tools), enable or disable individual tools (blacklist; newly discovered tools default to enabled), mask or reveal secrets, peek descriptions, refresh the shared tool snapshot, delete entries. Snapshot refresh trial-connects and updates the registry, then closes; it does not leave a live instance. Disabled tools are hidden from the AI and rejected again at the execution boundary. A setting row adjusts the catalog's **tool-description truncation** (default 150 chars).
 
 ### Model-facing tools
@@ -120,7 +134,7 @@ The plugin provides three small, fixed tools to manage all on-demand MCPs.
 | Field                           | Default                      | Meaning                                                                                                        |
 | ------------------------------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `dataDir`                     | `~/.dsh/skill-mcp-manager` | Registry/settings directory (`~/` is expanded).                                                              |
-| `profile`                     | `web`                      | Profile whose `cordis.patch.yml` is reconciled.                                                              |
+| `profile`                     | `''` (auto)               | Profile whose `cordis.patch.yml` is reconciled. `''` / `auto` follows the booted profile — DSH Desktop never sets `--profile`, so a bundle install must not guess. A name pins the install-time default; the settings page can switch the target at runtime (stored in `settings.json`). |
 | `trialTimeoutMs`              | `30000`                    | Trial-connection timeout used by `mcp_register` / `mcp_load`.                                              |
 | `toolCallTimeoutMs`           | `60000`                    | Per `tools/call` timeout.                                                                                    |
 | `catalogDescriptionMaxLength` | `500`                      | Truncation for the server description in the catalog.                                                          |
@@ -129,8 +143,8 @@ The plugin provides three small, fixed tools to manage all on-demand MCPs.
 
 ## Data
 
-- `~/.dsh/skill-mcp-manager/registry.json` — authoritative MCP registry (version 1, `entries[]`).
-- `~/.dsh/skill-mcp-manager/settings.json` — plugin settings (`customRecursiveDirs`, `toolDescriptionMaxLength`, …).
+- `~/.dsh/skill-mcp-manager/registry.<profile>.json` — authoritative MCP registry (version 1, `entries[]`). One file per managed profile: switching targets never merges one profile's servers into another's. A pre-1.3 `registry.json` is migrated once to the profile that the old argv-only detection resolved to, and kept as `registry.json.bak-<ts>`.
+- `~/.dsh/skill-mcp-manager/settings.json` — plugin settings (`customRecursiveDirs`, `toolDescriptionMaxLength`, `managedProfile`, …).
 - `~/.dsh/skill-mcp-manager/trash.log` — delete audit.
 - Env values may be literals or `$VAR` references to the process environment.
 

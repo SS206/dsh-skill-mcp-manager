@@ -84,7 +84,7 @@ async function reset() {
 }
 
 async function writeRegistry(entries) {
-  await writeFile(join(dataDir, "registry.json"), `${JSON.stringify({ version: 1, entries }, null, 2)}\n`, "utf8");
+  await writeFile(join(dataDir, "registry.test.json"), `${JSON.stringify({ version: 1, entries }, null, 2)}\n`, "utf8");
 }
 
 await apply(ctx, { dataDir, profile: "test", importNativeMcp: true });
@@ -94,7 +94,7 @@ const failed = [];
 
 // 1. registry: tavily adopted as on-demand (raw config preserved), off-server
 //    as disabled (native disabled flag honored).
-const registry = JSON.parse(await readFile(join(dataDir, "registry.json"), "utf8"));
+const registry = JSON.parse(await readFile(join(dataDir, "registry.test.json"), "utf8"));
 const byName = new Map(registry.entries.map((e) => [e.name, e]));
 console.log("registry entries:", registry.entries.map((e) => `${e.name}[${e.tier}]`).join(", "));
 if (byName.get("tavily")?.tier !== "on-demand") failed.push("tavily should adopt as on-demand");
@@ -317,7 +317,7 @@ await writeFile(join(profileDir, "cordis.patch.yml"), nativePatch, "utf8");
 await apply(ctx, { dataDir, profile: "test", importNativeMcp: true });
 await new Promise((resolve) => setTimeout(resolve, 50));
 const renamedPatch = await readFile(join(profileDir, "cordis.patch.yml"), "utf8");
-const renamedRegistry = JSON.parse(await readFile(join(dataDir, "registry.json"), "utf8"));
+const renamedRegistry = JSON.parse(await readFile(join(dataDir, "registry.test.json"), "utf8"));
 console.log("---- renamed patch ----\n" + renamedPatch);
 console.log("renamed registry entries:", renamedRegistry.entries.map((e) => e.name).join(", "));
 if (renamedRegistry.entries.length !== 2) failed.push(`rename: expected 2 entries (tavily2 + absorbed off-server), got ${renamedRegistry.entries.length}`);
@@ -327,6 +327,109 @@ if (dshRowCount(renamedPatch) !== 2) failed.push(`rename: expected exactly 2 mer
 if (!renamedPatch.includes("serverName: tavily2")) failed.push("rename: merged row does not carry the new name");
 if (/serverName: tavily$/m.test(renamedPatch)) failed.push("rename: old serverName still present in the patch");
 if ((renamedPatch.match(/- id: mcp-tavily/g) || []).length !== 1) failed.push("rename: mcp-tavily row duplicated");
+
+// 10. Loader expressions survive a takeover and a handover: a native row using
+//     `!!js` must be written back from its VERBATIM source text. Regenerating
+//     it from the parsed value would replace the expression with the literal
+//     string ("process.execPath") — the MCP entry would then fail to start and
+//     the patch would stay broken for the next boot.
+await reset();
+const expressionPatch = [
+  "# expression section — must survive",
+  "- insert:",
+  "    - id: mcp-expr",
+  "      name: '@deepseek-ai/dsh-mcp-client'",
+  "      config:",
+  "        serverName: expr-server",
+  "        transport: stdio",
+  "        command: !!js \"process.execPath\"",
+  "        args:",
+  "          - !!js \"process.env.APPDATA + '/npm/x.js'\"",
+  "          - serve",
+  "        toolCallTimeoutMs: 120000",
+  "",
+  "# next-row note — must stay outside the managed block, exactly once",
+  "- insert:",
+  "    - id: mcp-plain",
+  "      name: '@deepseek-ai/dsh-mcp-client'",
+  "      config:",
+  "        serverName: plain-server",
+  "        transport: streamable-http",
+  "        url: 'http://127.0.0.1:1/mcp/'",
+].join("\n") + "\n";
+await writeFile(join(profileDir, "cordis.patch.yml"), expressionPatch, "utf8");
+await apply(ctx, { dataDir, profile: "test", importNativeMcp: true, trialTimeoutMs: 1500 });
+await new Promise((resolve) => setTimeout(resolve, 50));
+const exprPatch = await readFile(join(profileDir, "cordis.patch.yml"), "utf8");
+console.log("---- expression patch ----\n" + exprPatch);
+const exprRegistry = JSON.parse(await readFile(join(dataDir, "registry.test.json"), "utf8"));
+if (!exprPatch.includes("command: !!js \"process.execPath\"")) failed.push("expression row lost its !!js command");
+if (!exprPatch.includes("!!js \"process.env.APPDATA + '/npm/x.js'\"")) failed.push("expression row lost its !!js argument");
+if (!/mcp-expr[\s\S]*?disabled: true/.test(exprPatch)) failed.push("adopted expression row is not disabled inside the managed block");
+if (dshRowCount(exprPatch) !== 2) failed.push(`expression: expected 2 dsh rows, got ${dshRowCount(exprPatch)}`);
+// A comment sitting between two rows describes what comes next: it stays in
+// place (outside the managed block) and never travels inside a row's text.
+if ((exprPatch.match(/# next-row note/g) || []).length !== 1) failed.push("expression: the between-rows comment must survive exactly once");
+const exprBlockAt = exprPatch.indexOf("# ── Managed MCP servers");
+if (exprPatch.slice(exprBlockAt).includes("# next-row note")) failed.push("expression: the between-rows comment leaked into the managed block");
+if (!/mcp-expr[\s\S]*?toolCallTimeoutMs: 120000\n\s*disabled: true/.test(exprPatch)) failed.push("expression: the row's own keys must stay last (disabled right after them)");
+const exprEntry = exprRegistry.entries.find((entry) => entry.name === "expr-server");
+if (typeof exprEntry?.rawEntryText !== "string" || !exprEntry.rawEntryText.includes("!!js")) {
+  failed.push("expression: the registry did not keep the verbatim row text");
+}
+// The registry holds the EVALUATED value: this plugin launches the server itself.
+if (exprEntry?.command !== process.execPath) failed.push("expression: the command was not evaluated for the registry");
+if (!String(exprEntry?.args?.[0] ?? "").endsWith("/npm/x.js")) failed.push("expression: the argument expression was not evaluated");
+
+// 10b. The second boot re-reads the managed block; it must be byte-stable.
+await apply(ctx, { dataDir, profile: "test", importNativeMcp: true, trialTimeoutMs: 1500 });
+await new Promise((resolve) => setTimeout(resolve, 50));
+const exprAgain = await readFile(join(profileDir, "cordis.patch.yml"), "utf8");
+if (exprAgain !== exprPatch) failed.push("expression: a second reconcile rewrote the patch");
+
+// 10c. Handover keeps the expression too (and drops the managed disabled flag).
+const prepareExpr = lastPrepareUninstall();
+if (prepareExpr) {
+  await prepareExpr.handler();
+  const handedExpr = await readFile(join(profileDir, "cordis.patch.yml"), "utf8");
+  console.log("---- expression handover ----\n" + handedExpr);
+  if (!handedExpr.includes("command: !!js \"process.execPath\"")) failed.push("expression handover lost the !!js command");
+  if (/mcp-expr[\s\S]*?disabled: true/.test(handedExpr)) failed.push("expression handover left the row disabled");
+}
+
+// 10d. A row whose expression the plugin cannot evaluate stays NATIVE: adopting
+//      it would mean launching the literal expression text as a command.
+await reset();
+const exoticPatch = [
+  "# exotic section",
+  "- insert:",
+  "    - id: mcp-exotic",
+  "      name: '@deepseek-ai/dsh-mcp-client'",
+  "      config:",
+  "        serverName: exotic-server",
+  "        transport: streamable-http",
+  "        url: !!js \"ctx.someHelper()\"",
+].join("\n") + "\n";
+await writeFile(join(profileDir, "cordis.patch.yml"), exoticPatch, "utf8");
+await apply(ctx, { dataDir, profile: "test", importNativeMcp: true, trialTimeoutMs: 1500 });
+await new Promise((resolve) => setTimeout(resolve, 50));
+const exoticAfter = await readFile(join(profileDir, "cordis.patch.yml"), "utf8");
+// Nothing is adopted, so no registry file is written at all — treat it as empty.
+let exoticRegistry = { entries: [] };
+try {
+  exoticRegistry = JSON.parse(await readFile(join(dataDir, "registry.test.json"), "utf8"));
+} catch {
+  /* no entries adopted: no registry file */
+}
+console.log("---- exotic patch ----\n" + exoticAfter);
+if (exoticRegistry.entries.some((entry) => entry.name === "exotic-server")) failed.push("exotic: an unevaluable expression row must not be adopted");
+if (!exoticAfter.includes("- id: mcp-exotic")) failed.push("exotic: the row must stay in the patch");
+const exoticBlockStart = exoticAfter.indexOf("# ── Managed MCP servers");
+const exoticBlockEnd = exoticAfter.indexOf("# ── End managed MCP servers");
+const exoticBlock = exoticBlockStart >= 0 && exoticBlockEnd > exoticBlockStart ? exoticAfter.slice(exoticBlockStart, exoticBlockEnd) : "";
+if (exoticBlock.includes("- id:")) failed.push("exotic: the managed block must not claim the unevaluable row");
+if (/mcp-exotic[\s\S]*?disabled: true/.test(exoticAfter)) failed.push("exotic: the untouched native row must not be disabled");
+if (!exoticAfter.includes("url: !!js \"ctx.someHelper()\"")) failed.push("exotic: the row text must stay verbatim");
 
 // 9. Duplicate-id self-check: two registry entries claiming the same row id
 //    must abort the patch write (keep the file untouched) instead of writing

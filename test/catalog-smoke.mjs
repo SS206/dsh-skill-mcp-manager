@@ -21,7 +21,7 @@ const dataDir = join(tmp, "data");
 await rm(tmp, { recursive: true, force: true });
 await mkdir(dataDir, { recursive: true });
 
-await writeFile(join(dataDir, "registry.json"), `${JSON.stringify({
+await writeFile(join(dataDir, "registry.__test__.json"), `${JSON.stringify({
   version: 1,
   entries: [
     {

@@ -62,9 +62,9 @@ SKILL 管理
 
 `mcp_register` 会**先试连 + 列工具，通过才持久化**——只有配置正确的服务器才会被放行。
 
-### 10. 只管理所在 profile
+### 10. 默认只管理所在 profile，也可手动切换
 
-插件只管理它安装进的 profile——不越权、不错位。
+默认跟随**本次启动的 profile**（读宿主提供的 `profileContext`，不猜命令行）——不越权、不错位；需要时可在设置页把管理目标切到 web / desktop / 其它 profile，切换时自动把旧目标交还原生 MCP 配置并各 profile 独立记账。
 
 ## 安装
 
@@ -80,7 +80,10 @@ dsh plugin --profile <profile> add dsh-skill-mcp-manager
       name: 'dsh-skill-mcp-manager'
       config:
         dataDir: ''            # 空 = ~/.dsh/skill-mcp-manager
-        profile: web           # 要用在哪里就写哪个 profile
+        # 留空或 auto = 跟随本次启动的 profile（推荐：插件就管它装进的那个 profile；
+        # DSH Desktop 从不传 --profile，profile 目录是位置参数）。
+        # 写具体名字 = 安装期默认值；设置页可在运行时切换（存进 settings.json）。
+        profile: ''
         trialTimeoutMs: 30000
         toolCallTimeoutMs: 60000
         catalogDescriptionMaxLength: 500
@@ -90,17 +93,27 @@ dsh plugin --profile <profile> add dsh-skill-mcp-manager
 
 重启 profile 生效。插件挂在宿主组合里，`mcp_register` / `mcp_load` / `mcp_call` 三件套对该 profile 下所有会话可见；eager 工具由每个会话在自己的上下文中注册，MCP 运行实例按会话独立。
 
+> **表达式说明**：原生行里的 `!!js …` 加载器表达式会被**求值后**用于本插件启动服务器，而补丁里保留**表达式原文**（卸载/切换时逐字交还）。无法求值的表达式行**不会被接管**，原样留在原位（日志有 warn）。
+
 > **接管说明**：`importNativeMcp: true`（默认）时，原生 `dsh-mcp-client` 条目会被导入能力库并在原生层禁用——能力库成为唯一入口（三档、`mcp-catalog`、UI）。卸载插件前先跑 `/mcp prepare-uninstall` 交还条目。
 
 ## 使用
 
 ### 界面
 
-打开 **设置 → 能力库**：
+打开 **设置 → 能力库**（一个设置页，内部「技能 / MCP」两个页签，切换有滑动动画）：
 
-- **SKILL tab** —— 所有托管技能（bundle 型 `SKILL.md`）按路径排序：模型可见性开关、系统编辑器打开、跨平台删除。部署自带技能（`node_modules` / `app.asar` 下）为**只读**：仅查看 + 打开。
-- **MCP tab** —— 所有已注册服务器（档位徽标、工具数）：切档位、查详情（命令 / env / headers / 工具）、逐工具“启用/禁用”（黑名单，新工具默认启用）、密钥打码/显示、查看描述、刷新快照、删除条目。刷新快照只试连并更新注册表，不留下运行实例。禁用工具不向 AI 暴露，并在实际调用入口强制拒绝。顶部设置行可调目录的**工具描述截断长度**（默认 150 字符）和 **stdio 消息上限**（MB，留空 = SDK 默认 10）：某条响应超过上限时会被丢弃并向 AI 返回带大小数值的报错，连接不断开；若那条响应是合法的大负载（如内联图片的笔记），把上限调大后重新 `mcp_load` 即可。仅对 stdio 条目生效，对之后加载的连接生效。
+- **MCP 页签**只放两部分：
+  - 顶部「管理 profile」行 —— 显示当前管理的 profile 及其来源（跟随运行中的 profile / 安装配置指定 / 设置页固定）、补丁路径与候选 profile。切换会把被释放的 profile 交还成它原来的补丁、接管新目标，并丢弃所有会话实例（下一步起用新库重建）。目标不是当前运行的 profile、或该 profile 没装本插件时，页面会先给出警告并要求二次确认。
+  - 统一清单，按来源分组，四类来源一次看全：
+    - **托管**：本插件接管或登记的行。档位三段（常驻 / 按需 / 关闭）、逐工具启用/禁用（黑名单，新工具默认启用）、查看描述、刷新快照、删除条目。
+    - **用户补丁**：仍留在 profile 补丁层、本插件没有接管的行（例如 `!!js` 求值失败而有意跳过的）。可停用/启用与重启，配置只读。
+    - **捆绑**：其它 bundle 提供的 MCP（如 exa、calagopus —— 它们的行在各自 bundle 的 `cordis.patch.yml` 里，不在 profile 的用户补丁层）。可停用/启用与重启；配置属于该 bundle，本插件不改。
+    - **内置**：宿主自带的工具集（computer-use / browser-use），只读。
 
+    停用/启用走**用户补丁层的 `disabled` 覆盖项**（`- id: <id>` + `disabled: true`），约 1 秒热生效；「重启」就地重跑该服务器的连接（`fiber.restart()`），配置不动。管理非当前运行的 profile 时捆绑段隐藏并提示；密钥可打码/显示。
+- **技能页签**：所有托管技能（bundle 型 `SKILL.md`）按路径排序 —— 模型可见性开关、系统编辑器打开、跨平台删除；**描述默认折叠**（点「描述」展开）。部署自带技能（`node_modules` / `app.asar` 下）为**只读**。
+- **插件级设置**（工具描述截断、stdio 消息上限、模型登记本地程序三档、局域网主机名允许名单）在 **插件列表 → dsh-skill-mcp-manager** 那一页，不占能力库的空间。
 ### 模型工具面
 
 插件会提供三个恒定小工具，以管理所有的按需加载MCP。
@@ -120,7 +133,7 @@ dsh plugin --profile <profile> add dsh-skill-mcp-manager
 | 字段                            | 默认                         | 含义                                                               |
 | ------------------------------- | ---------------------------- | ------------------------------------------------------------------ |
 | `dataDir`                     | `~/.dsh/skill-mcp-manager` | 注册表/设置目录（`~/` 会展开）。                                 |
-| `profile`                     | `web`                      | 要 reconcile 的 profile。                                          |
+| `profile`                     | `''`（自动）                | 要 reconcile 的 profile。留空或 `auto` 表示跟随本次启动的 profile——DSH Desktop 从不传 `--profile`（profile 目录是位置参数），所以不能靠猜。写具体名字只是安装期默认值；设置页可以在运行时切换目标（写入 `settings.json`）。 |
 | `trialTimeoutMs`              | `30000`                    | `mcp_register` / `mcp_load` 的试连超时。                       |
 | `toolCallTimeoutMs`           | `60000`                    | 单次 `tools/call` 超时。                                         |
 | `catalogDescriptionMaxLength` | `500`                      | 目录里服务器描述的截断长度。                                       |
@@ -129,8 +142,8 @@ dsh plugin --profile <profile> add dsh-skill-mcp-manager
 
 ## 数据
 
-- `~/.dsh/skill-mcp-manager/registry.json` —— 权威 MCP 注册表（version 1，`entries[]`）。
-- `~/.dsh/skill-mcp-manager/settings.json` —— 插件设置（`customRecursiveDirs`、`toolDescriptionMaxLength`、`stdioMaxBufferSizeMb` 等）。
+- `~/.dsh/skill-mcp-manager/registry.<profile>.json` —— 权威 MCP 注册表（version 1，`entries[]`）。**按 profile 分账**：切换目标不会把一个 profile 的服务器混进另一个。1.3 之前的单文件 `registry.json` 会一次性归入"旧版探测到的那个 profile"，原文件保留为 `registry.json.bak-<ts>`。
+- `~/.dsh/skill-mcp-manager/settings.json` —— 插件设置（`customRecursiveDirs`、`toolDescriptionMaxLength`、`stdioMaxBufferSizeMb`、`managedProfile` 等）。
 - `~/.dsh/skill-mcp-manager/trash.log` —— 删除审计。
 - env 值可为明文或 `$VAR` 进程环境变量引用。
 
