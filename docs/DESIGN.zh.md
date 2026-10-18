@@ -339,6 +339,20 @@ tmp/                      # 插件内部临时文件（AI 不直接引用；无 
 4. **生效边界（UI 必须说明）**：当前运行的 profile 被交还后，它的原生 MCP 行要到**该 profile 下次启动**才回到工具表；新目标 profile 的 MCP 立即可用（走 on-demand 桥）。目标不是运行中的 profile、或目标未安装本插件时，UI 在切换前给出警告并要求二次确认（否则该 profile 启动时会失去原生 MCP）。
 5. **测试**：`test/profile-target-smoke.mjs`（解析优先级、patchPath、名字校验、分账文件名、profile 枚举标注）、`test/profile-switch-smoke.mjs`（启动跟随 profileContext、切 web 时 desktop 逐字交还、web 接管并保持原生 disabled、两账本互不污染、切回再接管、非法/未知目标不落盘、清空覆盖回落到运行 profile）。
 
+### 5.14 统一 MCP 清单与非托管行操作（2026-10-18）
+
+**为什么要改**：旧列表只认识本插件账本里的条目。exa、calagopus 这类 MCP 由**独立 bundle** 提供（`~/.dsh/*-mcp-bundle/cordis.patch.yml`，经 profile 的 `dsh.profile.bundles` 组合进 loader 树），行不在 profile 的用户补丁层里，于是界面完全看不到它们。
+
+1. **四类来源**（`lib/inventory.js`，纯函数；事实由宿主侧收集后传入）：
+   - **托管**：`registry.<profile>.json` 条目（档位、逐工具开关、会话实例、连接失败状态）；
+   - **用户补丁**：目标 profile 的 `cordis.patch.yml` 里仍是 `@deepseek-ai/dsh-mcp-client` insert 行、且未被账本认领的条目（例如 `!!js` 求值失败而有意不接管的行）；
+   - **捆绑**：`ctx.get('loader').entries()` 中 `options.name === '@deepseek-ai/dsh-mcp-client'` 的活动行，按 `config.serverName` 与前面两类去重；**只反映本进程启动的 profile**，管理其它 profile 时整段隐藏（`bundleAvailable: false`）；
+   - **内置**：`ctx.get('computerUse'|'browserUse')` 存在时列出，只读。
+   工具表按桥接命名约定从 `ctx.get('tools').schemas()` 取 `mcp__<server>__<tool>`（内置按 `computerUse → computer_use_` 推导）。每行的规范键是 `serverKey`：托管行 = 账本名，其余 = loader 的 `serverName`（托管行模型面的 `serverName` 是服务器自报的实现名，常为空）。新路由 `GET /skill-mcp-manager/inventory`。
+2. **非托管行的启停 = 用户补丁层的 `disabled` 覆盖项**（`- id: <id>` + `disabled: true`，与 dsh-mcp-manager-plus 同一杠杆；profile 以 `patchReload: live` 运行，约 1 秒热生效）：用户补丁层自有的行启用时**删除**覆盖项，bundle 行写 `disabled: false`（缺席无法把被 bundle 层按住的行放开）。覆盖项是顶层 `- id:` 项、没有 `insert:`；absorb 与行清理只认 insert 行，因此覆盖项永远不会被当成服务器定义，reconcile 后原样保留。行 id 既做模式校验（`^[A-Za-z0-9._:@/-]{1,200}$`）又以 JSON 字符串写入，杜绝借 id 注入 YAML 行。新路由 `POST /skill-mcp-manager/row/toggle`。
+3. **就地重启**（`POST /skill-mcp-manager/row/restart`）：`entry.fiber.restart()`（DSH ≥ 0.2.0-rc.x）；旧载入器回退 `entry._dispose()` + `entry.init()`；未挂载 / 已停用 / 载入器不支持三种情形分别报错。
+4. **测试**：`test/inventory-smoke.mjs`（四类来源与去重、覆盖项往返与幂等、跨 reconcile 保留、YAML 注入拒绝、重启两代路径）、`test/client-contract-smoke.mjs`（客户端用到的每条路径都有对应路由、两个设置页注册仍在）。
+
 ---
 
 ## 6. 注入与 KV 缓存设计（统一原则）
@@ -350,11 +364,11 @@ tmp/                      # 插件内部临时文件（AI 不直接引用；无 
 
 ## 7. UI 设计（Slots）
 
-- `settings.section` 两个抽屉页（root scope，replaceRisk=none）：
-  - **SKILL 管理**：列表（名字 / 描述 / 路径，**按路径排序**）；头部计数「N 个技能 · 模型可见 M 个」（M 按行内 `modelInvocable` 过滤，前端计算，随启停刷新）；行内启停 Switch 成功后只在当前列表更新对应行，不全量刷新、不显示成功提示，保持滚动位置；点击条目 → 系统编辑器打开（§4.2）；删除按钮（整个 SKILL 文件夹，跨平台回收站/trash，二次确认）；"添加外接目录"（`ctx.directoryPicker`）。
-  - **工具（MCP）管理**：注册表列表（档位徽标、调用通道 Native/Bridge、工具数、notes、reconcile 状态）→ 详情（工具表格、描述、schema 查看、备注编辑、密钥打码/显示；每个工具名前有“启用/禁用”二档下拉框，启用为正常文字、禁用后下拉框/名称/描述变灰）→ "查看描述"(=peek 只读快照)、"刷新快照"（一次性试连并更新 registry，不留下实例）、档位切换（立即对存活会话生效；升级时弹窗提示"一次前缀失效"、无需二次确认）、**删除条目（仅 UI；= registry + patch 整条 entry 一起删，非翻 disabled、非只删一行）**、"/mcp prepare-uninstall"（= 卸载整个插件时交还原生）。
-- 入口：`sidebar.footer.action` + `/skills`、`/mcp` 命令；状态同步经 RPC 推送。
-- **浏览器请求的地址检查**（2026-09-24）：带 `Origin` 的读和写都必须同源，并且主机名是 `localhost`、本机名或 IP 字面量。局域网主机名放在插件设置的允许名单里，默认空；不在名单里的主机名打不开这些接口，也就不能自己把自己加进去。不带 `Origin` 的调用保持原样（POST 仍要同源，GET 不额外拦截）。设置页同一处还有「模型登记本地程序」三档。常驻连接失败时，列表在档位旁边显示「连接失败，按按需处理」。
+- 两个设置页（root scope，replaceRisk=none），一页一件事，与 shell 自己的设置页同构（2026-10-18 起，取代原来的单页双页签）：
+  - **MCP 管理**（`settings.section` id `mcp-manager`，order 35）：顶部「管理 profile」行（目标与来源、补丁路径与注册表路径、候选 profile、危险目标二次确认）；下面是统一清单，按来源分组（§5.14）——**托管**（档位三段、工具数徽标、详情里的逐工具启停、查看描述/刷新快照、删除条目）、**用户补丁**（启停开关 + 重启 + 只读详情）、**捆绑**（启停开关 + 重启）、**内置**（只读）；行内显示传输、工具数、「连接失败」徽标；密钥打码/显示；底部是插件设置（工具描述截断、stdio 消息上限、模型登记本地程序三档、局域网主机名允许名单）。管理非启动中的 profile 时，捆绑段隐藏并给出提示。
+  - **技能管理**（id `skills-manager`，order 36）：列表（名字 / 描述 / 路径，**按路径排序**）；头部计数「N 个技能 · 模型可见 M 个」；行内启停 Switch 成功后只更新当前行、保持滚动位置；点击条目 → 系统编辑器打开（§4.2）；删除整个 SKILL 文件夹（跨平台回收站/trash，二次确认）；部署自带技能（`node_modules` / `app.asar`）为**只读**。
+- 入口：`settings.section` 两行；`/skills`、`/mcp` 命令（`/mcp` 同时列出非托管来源）；状态同步经 HTTP 路由。
+- **浏览器请求的地址检查**（2026-10-18 改，对齐 dsh-market 修复后的规则）：**Origin 缺失即放行**——DSH Desktop 的页面从 `dsh-app://` 加载，桌面端自有代理会剥掉 `origin`/`host`/`cookie`/`sec-fetch-site`，旧规则（要求 POST 带匹配 Origin）因此把桌面端**所有写操作**拒成 403 `untrusted origin`，而 GET 正常；这就是"档位切换报 untrusted origin"的根因（dsh-market issue #648 同款）。Origin 存在则必须可解析且 host 与 Host 相等（`Origin: null`、空串拒绝，覆盖沙箱 iframe / `data:` 文档）；Host 存在则必须是回环（`127.0.0.1`/`localhost`/`[::1]`）或插件设置里的局域网允许名单。设置页同一处还有「模型登记本地程序」三档。常驻连接失败时，列表在档位旁边显示「连接失败，按按需处理」。
 
 ---
 

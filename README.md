@@ -66,6 +66,12 @@ After install the plugin connects once to fetch real tool names and descriptions
 
 By default it manages the **profile this host booted** (read from the host's `profileContext`, never guessed from the command line) — no overreach, no misplacement. When you need it, the settings page can switch the target to web / desktop / another profile: the released profile is handed back to its native MCP config and every profile keeps its own registry.
 
+### 11. Every MCP source in one list, on two native settings pages
+
+The UI is now **Settings → MCP Management** and **Settings → Skills Management** — one screen per concern, styled with DSH's own theme tokens. The MCP page merges every source a deployment can have: **Managed** (this plugin's registry: three tiers, per-tool switches, delete), **User patch** (rows left in the profile's patch layer, e.g. a loader expression that could not be evaluated), **Bundle** (servers another bundle contributes to the composed loader tree — e.g. exa, calagopus: enable/disable through a patch-layer `disabled` override, restart in place, read-only config) and **Built-in** (computer-use / browser-use). Live tool lists come from the model-facing schemas, so what the page shows is what the model can actually call.
+
+Because the browser half ships separately from the host process, a client that is newer than the running host degrades to the managed list with a "restart DSH" notice instead of failing.
+
 ## Install
 
 ```bash

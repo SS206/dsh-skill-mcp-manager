@@ -16,6 +16,11 @@ All notable changes to dsh-skill-mcp-manager (能力库 / Capability) are docume
 - **非托管行可停用/启用与就地重启**。停用走**用户补丁层的 `disabled` 覆盖项**（`- id: <id>` + `disabled: true`，与 dsh-mcp-manager-plus 同一杠杆；profile 以 `patchReload: live` 运行，约 1 秒热生效）：用户补丁层自有的行启用时**删除**覆盖项，bundle 行则写 `disabled: false`（缺席无法把 bundle 层按住的行放开）。覆盖项是顶层 `- id:` 项、无 `insert:`，absorb 与行清理只认 insert 行，所以它们永远不会被当成服务器定义，reconcile 后也原样保留（有测试）。行 id 既做模式校验（`^[A-Za-z0-9._:@/-]{1,200}$`）又**以 JSON 字符串形式写入**，杜绝借 id 注入 YAML 行。就地重启用 `entry.fiber.restart()`（0.2.0-rc.x），旧载入器回退 `entry._dispose()` + `entry.init()`；未挂载/已停用/载入器不支持三种失败各自给出明确报错。新路由 `POST /skill-mcp-manager/row/toggle`、`POST /skill-mcp-manager/row/restart`。
 - 新测试 `test/inventory-smoke.mjs`：四类来源与去重、覆盖项写入/替换/删除与幂等、覆盖项跨 reconcile 保留、YAML 注入拒绝、重启的两代载入器路径。
 
+### Changed
+
+- **界面重做成两个原生风格设置页**：原来的「能力库」单页 + 技能/MCP 两个页签拆成 **设置 → MCP 管理** 与 **设置 → 技能管理** 两行（与 shell 自己的设置页同构，一页一件事）。MCP 页顶部仍是「管理 profile」行（目标与来源、补丁路径、危险目标二次确认），下面是按来源分组的统一清单：**托管**（档位三段、逐工具启停、查看描述/刷新快照、删除条目）、**用户补丁**（启停开关 + 重启 + 只读配置详情）、**捆绑**（启停开关 + 重启）、**内置**（只读），行内显示传输、工具数与「连接失败」徽标，底部是插件设置（工具描述截断、stdio 消息上限、模型登记本地程序三档、局域网主机名允许名单）。样式全部走 DSW 主题别名 token（`--dsw-alias-*`）。客户端在宿主进程尚未重启、还没有 `/inventory` 路由时会**降级**到旧的托管列表并提示重启，不会白屏。
+- 新测试 `test/client-contract-smoke.mjs`：客户端用到的每条 `/skill-mcp-manager/*` 路径都必须有对应路由，两个设置页注册与 `shell.overlay` 通知位必须在，旧的页签结构不得回潮。
+
 ## [1.3.0-local.1] — 2026-10-18
 
 本地维护分支（**不是上游 npm 发布**；来源与安装方式见 [`docs/LOCAL-FORK.zh.md`](docs/LOCAL-FORK.zh.md)）。
